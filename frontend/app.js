@@ -1058,7 +1058,6 @@ window.confirmUpdateVenta = async function() {
 //  ÓRDENES DE COMPRA
 // ─────────────────────────────────────────────
 
-// Estado interno de los items de la orden actual
 window.ocItems = [];
 
 function iniciarModalOrdenCompra() {
@@ -1073,21 +1072,21 @@ function iniciarModalOrdenCompra() {
   cargarSugeridosOC();
 }
 
-// ── Sugeridos (low stock: qty <= min_stock) ──
+// ── Sugeridos: solo productos con qty === 1 (omite stock 0) ──
 function cargarSugeridosOC() {
   const cont = document.getElementById('moc-sugeridos-lista');
-  const lowStock = productos.filter(p =>
-    p.qty <= p.min_stock &&
+  const sugeridos = productos.filter(p =>
+    p.qty === 1 &&
     (p.categoria.startsWith('Playera') || p.categoria.startsWith('Sudadera'))
   );
 
-  if (lowStock.length === 0) {
-    cont.innerHTML = '<div style="color:#aaa;font-size:0.85rem;">Sin productos con stock bajo en Playera/Sudadera.</div>';
+  if (sugeridos.length === 0) {
+    cont.innerHTML = '<div style="color:#aaa;font-size:0.85rem;">Sin productos con exactamente 1 pieza en Playera/Sudadera.</div>';
     return;
   }
 
   cont.innerHTML = '';
-  lowStock.forEach(p => {
+  sugeridos.forEach(p => {
     const res = extractColorSize(p.nombre.includes('>') ? p.nombre.split('>').slice(1).join('>') : (p.nombre.split(' - ')[1] || ''));
     const div = document.createElement('div');
     div.style = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed #f0f0f0;font-size:0.82rem;';
@@ -1109,22 +1108,13 @@ window.agregarSugeridoOC = function(productoId) {
   const precio = parseFloat(precioEl.value) || 0;
   const p = productos.find(x => x.id === productoId);
   if (!p) return;
-
-  // Evitar duplicados: si ya existe, sumar qty
   const existe = window.ocItems.find(i => i.producto_id === productoId);
   if (existe) {
     existe.qty += qty;
     existe.precio_proveedor = precio;
   } else {
     const res = extractColorSize(p.nombre.includes('>') ? p.nombre.split('>').slice(1).join('>') : (p.nombre.split(' - ')[1] || ''));
-    window.ocItems.push({
-      producto_id: productoId,
-      nombre: p.nombre,
-      color: res.color || '',
-      talla: res.size || '',
-      qty,
-      precio_proveedor: precio
-    });
+    window.ocItems.push({ producto_id: productoId, nombre: p.nombre, color: res.color || '', talla: res.size || '', qty, precio_proveedor: precio });
   }
   renderItemsOC();
   toast(`${p.nombre} agregado a la orden`, true);
@@ -1136,18 +1126,15 @@ window.buscarProductoOC = function() {
   const cont = document.getElementById('moc-resultados');
   cont.innerHTML = '';
   if (!texto) return;
-
   const matches = productos.filter(p =>
     p.nombre.toLowerCase().includes(texto) ||
     (p.sku || '').toLowerCase().includes(texto) ||
     p.categoria.toLowerCase().includes(texto)
   ).slice(0, 15);
-
   if (matches.length === 0) {
     cont.innerHTML = '<div style="padding:6px;color:#aaa;font-size:0.82rem;">Sin resultados.</div>';
     return;
   }
-
   matches.forEach(p => {
     const div = document.createElement('div');
     div.style = 'display:flex;align-items:center;justify-content:space-between;padding:5px 8px;cursor:pointer;font-size:0.82rem;border-bottom:1px solid #f3f4f6;';
@@ -1178,13 +1165,11 @@ window.agregarManualOC = function(productoId) {
 function renderItemsOC() {
   const cont = document.getElementById('moc-items-lista');
   cont.innerHTML = '';
-
   if (window.ocItems.length === 0) {
     cont.innerHTML = '<div style="color:#aaa;font-size:0.82rem;padding:8px;">Sin productos agregados aún.</div>';
     recalcularTotalesOC();
     return;
   }
-
   window.ocItems.forEach((item, idx) => {
     const div = document.createElement('div');
     div.style = 'display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px dashed #e2e8f0;font-size:0.82rem;';
@@ -1199,7 +1184,6 @@ function renderItemsOC() {
     `;
     cont.appendChild(div);
   });
-
   recalcularTotalesOC();
 }
 
@@ -1207,7 +1191,6 @@ window.updateOCItem = function(idx, campo, valor) {
   if (campo === 'qty') window.ocItems[idx].qty = parseInt(valor) || 1;
   if (campo === 'precio') window.ocItems[idx].precio_proveedor = parseFloat(valor) || 0;
   recalcularTotalesOC();
-  // Actualizar solo el subtotal del item sin re-renderizar todo
   const filas = document.querySelectorAll('#moc-items-lista > div');
   if (filas[idx]) {
     const spans = filas[idx].querySelectorAll('span');
@@ -1227,29 +1210,13 @@ function recalcularTotalesOC() {
   document.getElementById('moc-total-precio').textContent = mxn(totalPrecio);
 }
 
-// ── Guardar orden en el backend ──
 window.guardarOrdenCompra = async function() {
   const proveedor = document.getElementById('moc-proveedor').value.trim();
   const estado = document.getElementById('moc-estado').value;
   const notas = document.getElementById('moc-notas').value.trim();
-
   if (!proveedor) { toast('El nombre del proveedor es obligatorio', false); return; }
   if (window.ocItems.length === 0) { toast('Agrega al menos un producto a la orden', false); return; }
-
-  const body = {
-    proveedor,
-    estado,
-    notas,
-    items: window.ocItems.map(i => ({
-      producto_id: i.producto_id,
-      nombre: i.nombre,
-      color: i.color,
-      talla: i.talla,
-      qty: i.qty,
-      precio_proveedor: i.precio_proveedor
-    }))
-  };
-
+  const body = { proveedor, estado, notas, items: window.ocItems.map(i => ({ producto_id: i.producto_id, nombre: i.nombre, color: i.color, talla: i.talla, qty: i.qty, precio_proveedor: i.precio_proveedor })) };
   try {
     const orden = await req('POST', '/ordenes-compra', body);
     toast(`✅ Orden ${orden.folio} guardada`, true);
@@ -1260,24 +1227,15 @@ window.guardarOrdenCompra = async function() {
   }
 };
 
-// ── Listado de órdenes ──
 async function renderOrdenesCompra() {
   try {
     const ordenes = await req('GET', '/ordenes-compra');
     const list = document.getElementById('oc-list');
     const empty = document.getElementById('oc-empty');
-
-    if (!ordenes || ordenes.length === 0) {
-      list.innerHTML = '';
-      empty.style.display = 'block';
-      return;
-    }
-
+    if (!ordenes || ordenes.length === 0) { list.innerHTML = ''; empty.style.display = 'block'; return; }
     empty.style.display = 'none';
     list.innerHTML = '';
-
     const colores = { borrador: '#fbbf24', enviada: '#2563eb', confirmada: '#16a34a' };
-
     ordenes.forEach(orden => {
       const div = document.createElement('div');
       div.style = 'margin:10px 0;padding:12px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;';
@@ -1307,7 +1265,6 @@ async function renderOrdenesCompra() {
   }
 }
 
-// ── Confirmar orden → genera entradas en inventario ──
 window.confirmarOrdenCompra = async function(ordenId) {
   showConfirm('¿Confirmar esta orden? Se actualizará el inventario con las entradas correspondientes.', async () => {
     try {
@@ -1315,13 +1272,10 @@ window.confirmarOrdenCompra = async function(ordenId) {
       toast(`✅ Orden ${updated.folio} confirmada. Inventario actualizado.`, true);
       await loadProductos();
       renderOrdenesCompra();
-    } catch (e) {
-      toast('Error al confirmar: ' + e.message, false);
-    }
+    } catch (e) { toast('Error al confirmar: ' + e.message, false); }
   });
 };
 
-// ── Ver detalle de una orden ──
 window.verOrdenCompra = async function(ordenId) {
   try {
     const orden = await req('GET', `/ordenes-compra/${ordenId}`);
@@ -1341,24 +1295,18 @@ window.verOrdenCompra = async function(ordenId) {
     document.getElementById('btn-confirm-ok').style.display = 'none';
     document.getElementById('overlay-confirm').classList.add('active');
     document.getElementById('btn-confirm-ok').onclick = () => closeConfirm(false);
-  } catch (e) {
-    toast('Error al cargar la orden: ' + e.message, false);
-  }
+  } catch (e) { toast('Error al cargar la orden: ' + e.message, false); }
 };
 
-// ── Generar PDF de la orden actual (desde el modal) ──
 window.generarPDFOrdenActual = function() {
   if (window.ocItems.length === 0) { toast('Agrega productos a la orden primero', false); return; }
   if (!window.jspdf) { toast('Error: jsPDF no cargada', false); return; }
-
   const proveedor = document.getElementById('moc-proveedor').value.trim() || 'Sin proveedor';
   const estado = document.getElementById('moc-estado').value;
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [80, 250] });
   let y = 10;
-
   const line = () => { doc.line(5, y, 75, y); y += 5; };
-
   doc.setFontSize(12); doc.setFont('helvetica', 'bold');
   doc.text('Kromo Pinceles', 40, y, { align: 'center' }); y += 7;
   doc.setFontSize(9); doc.setFont('helvetica', 'normal');
@@ -1368,38 +1316,29 @@ window.generarPDFOrdenActual = function() {
   doc.text(`Estado: ${estado}`, 5, y); y += 5;
   doc.text(`Fecha: ${new Date().toLocaleDateString('es-MX')}`, 5, y); y += 5;
   line();
-
-  // Agrupar por color
   const grupos = {};
   window.ocItems.forEach(item => {
     const key = item.color || 'Sin color';
     if (!grupos[key]) grupos[key] = [];
     grupos[key].push(item);
   });
-
   Object.keys(grupos).forEach(color => {
     doc.setFont('helvetica', 'bold'); doc.setFontSize(8);
     doc.text(color, 5, y); y += 5;
     doc.setFont('helvetica', 'normal');
-
-    // Ordenar por talla
     grupos[color].sort((a, b) => (sizeOrderMap[a.talla] || 99) - (sizeOrderMap[b.talla] || 99));
-
     grupos[color].forEach(item => {
       const talla = item.talla || 'Única';
-      const texto = `  ${talla}: ${item.qty} pza(s)  ${mxn(item.precio_proveedor)} c/u`;
-      doc.text(texto, 5, y); y += 4;
+      doc.text(`  ${talla}: ${item.qty} pza(s)  ${mxn(item.precio_proveedor)} c/u`, 5, y); y += 4;
     });
     y += 2;
   });
-
   line();
   const totalQty = window.ocItems.reduce((a, i) => a + i.qty, 0);
   const totalPrecio = window.ocItems.reduce((a, i) => a + (i.qty * i.precio_proveedor), 0);
   doc.setFont('helvetica', 'bold'); doc.setFontSize(8);
   doc.text(`Total piezas: ${totalQty}`, 5, y); y += 5;
   doc.text(`Total estimado: ${mxn(totalPrecio)}`, 5, y);
-
   const filename = `OC_${Date.now()}.pdf`;
   try {
     const blob = doc.output('blob');
