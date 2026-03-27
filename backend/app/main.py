@@ -163,6 +163,43 @@ def _generar_folio() -> str:
     return f"OC-{now.year}-{num:04d}"
 
 
+def _item_to_dict(it) -> dict:
+    return {
+        "id": it.id,
+        "orden_id": it.orden_id,
+        "producto_id": it.producto_id,
+        "producto_nombre": it.producto_nombre or "",
+        "publico": it.publico or "",
+        "genero": it.genero or "",
+        "color": it.color or "",
+        "talla": it.talla or "",
+        "qty": it.qty,
+        "precio_proveedor": it.precio_proveedor or 0.0,
+        "subtotal": it.subtotal or 0.0,
+    }
+
+
+def _orden_to_dict(orden, items) -> dict:
+    return {
+        "id": orden.id,
+        "folio": orden.folio,
+        "proveedor": orden.proveedor or "",
+        "estado": orden.estado,
+        "total_estimado": orden.total_estimado or 0.0,
+        "notas": orden.notas or "",
+        "creado": orden.creado,
+        "actualizado": orden.actualizado,
+        "items": [_item_to_dict(it) for it in items],
+    }
+
+
+async def _get_items(db: AsyncSession, orden_id: int):
+    q = await db.execute(
+        select(models.OrdenCompraItem).where(models.OrdenCompraItem.orden_id == orden_id)
+    )
+    return q.scalars().all()
+
+
 @app.get("/ordenes-compra", response_model=List[schemas.OrdenCompraOut])
 async def listar_ordenes(
     estado: Optional[str] = None,
@@ -176,40 +213,10 @@ async def listar_ordenes(
     q = q.offset(skip).limit(limit)
     result = await db.execute(q)
     ordenes = result.scalars().all()
-
-    # Cargar items de cada orden
     out = []
     for orden in ordenes:
-        items_q = await db.execute(
-            select(models.OrdenCompraItem).where(models.OrdenCompraItem.orden_id == orden.id)
-        )
-        orden_dict = {
-            "id": orden.id,
-            "folio": orden.folio,
-            "proveedor": orden.proveedor or "",
-            "estado": orden.estado,
-            "total_estimado": orden.total_estimado or 0.0,
-            "notas": orden.notas or "",
-            "creado": orden.creado,
-            "actualizado": orden.actualizado,
-            "items": [
-                {
-                    "id": it.id,
-                    "orden_id": it.orden_id,
-                    "producto_id": it.producto_id,
-                    "producto_nombre": it.producto_nombre or "",
-                    "publico": it.publico or "",
-                    "genero": it.genero or "",
-                    "color": it.color or "",
-                    "talla": it.talla or "",
-                    "qty": it.qty,
-                    "precio_proveedor": it.precio_proveedor or 0.0,
-                    "subtotal": it.subtotal or 0.0,
-                }
-                for it in items_q.scalars().all()
-            ]
-        }
-        out.append(orden_dict)
+        items = await _get_items(db, orden.id)
+        out.append(_orden_to_dict(orden, items))
     return out
 
 
@@ -221,36 +228,8 @@ async def obtener_orden(orden_id: int, db: AsyncSession = Depends(get_db)):
     orden = result.scalar_one_or_none()
     if not orden:
         raise HTTPException(status_code=404, detail="Orden no encontrada")
-
-    items_q = await db.execute(
-        select(models.OrdenCompraItem).where(models.OrdenCompraItem.orden_id == orden_id)
-    )
-    return {
-        "id": orden.id,
-        "folio": orden.folio,
-        "proveedor": orden.proveedor or "",
-        "estado": orden.estado,
-        "total_estimado": orden.total_estimado or 0.0,
-        "notas": orden.notas or "",
-        "creado": orden.creado,
-        "actualizado": orden.actualizado,
-        "items": [
-            {
-                "id": it.id,
-                "orden_id": it.orden_id,
-                "producto_id": it.producto_id,
-                "producto_nombre": it.producto_nombre or "",
-                "publico": it.publico or "",
-                "genero": it.genero or "",
-                "color": it.color or "",
-                "talla": it.talla or "",
-                "qty": it.qty,
-                "precio_proveedor": it.precio_proveedor or 0.0,
-                "subtotal": it.subtotal or 0.0,
-            }
-            for it in items_q.scalars().all()
-        ]
-    }
+    items = await _get_items(db, orden_id)
+    return _orden_to_dict(orden, items)
 
 
 @app.post("/ordenes-compra", response_model=schemas.OrdenCompraOut, status_code=201)
@@ -258,7 +237,6 @@ async def crear_orden(
     data: schemas.OrdenCompraCreate,
     db: AsyncSession = Depends(get_db)
 ):
-    # Generar folio único
     folio = _generar_folio()
     while True:
         existing = await db.execute(
@@ -268,7 +246,6 @@ async def crear_orden(
             break
         folio = _generar_folio()
 
-    # Calcular total
     total = sum(it.qty * it.precio_proveedor for it in data.items)
 
     orden = models.OrdenCompra(
@@ -279,9 +256,8 @@ async def crear_orden(
         notas=data.notas,
     )
     db.add(orden)
-    await db.flush()  # Para obtener el id de la orden
+    await db.flush()  # obtener id de la orden
 
-    items_out = []
     for it in data.items:
         subtotal = it.qty * it.precio_proveedor
         item = models.OrdenCompraItem(
@@ -297,37 +273,13 @@ async def crear_orden(
             subtotal=subtotal,
         )
         db.add(item)
-        items_out.append(item)
 
+    await db.flush()  # obtener IDs de los items
     await db.commit()
     await db.refresh(orden)
 
-    return {
-        "id": orden.id,
-        "folio": orden.folio,
-        "proveedor": orden.proveedor or "",
-        "estado": orden.estado,
-        "total_estimado": orden.total_estimado or 0.0,
-        "notas": orden.notas or "",
-        "creado": orden.creado,
-        "actualizado": orden.actualizado,
-        "items": [
-            {
-                "id": it.id,
-                "orden_id": it.orden_id,
-                "producto_id": it.producto_id,
-                "producto_nombre": it.producto_nombre or "",
-                "publico": it.publico or "",
-                "genero": it.genero or "",
-                "color": it.color or "",
-                "talla": it.talla or "",
-                "qty": it.qty,
-                "precio_proveedor": it.precio_proveedor or 0.0,
-                "subtotal": it.subtotal or 0.0,
-            }
-            for it in items_out
-        ]
-    }
+    items = await _get_items(db, orden.id)
+    return _orden_to_dict(orden, items)
 
 
 @app.put("/ordenes-compra/{orden_id}", response_model=schemas.OrdenCompraOut)
@@ -350,9 +302,7 @@ async def actualizar_orden(
     if data.notas is not None:
         orden.notas = data.notas
 
-    items_out = []
     if data.items is not None:
-        # Borrar items previos y reemplazar
         await db.execute(
             delete(models.OrdenCompraItem).where(models.OrdenCompraItem.orden_id == orden_id)
         )
@@ -373,43 +323,13 @@ async def actualizar_orden(
                 subtotal=subtotal,
             )
             db.add(item)
-            items_out.append(item)
         orden.total_estimado = total
-    else:
-        items_q = await db.execute(
-            select(models.OrdenCompraItem).where(models.OrdenCompraItem.orden_id == orden_id)
-        )
-        items_out = items_q.scalars().all()
+        await db.flush()
 
     await db.commit()
     await db.refresh(orden)
-
-    return {
-        "id": orden.id,
-        "folio": orden.folio,
-        "proveedor": orden.proveedor or "",
-        "estado": orden.estado,
-        "total_estimado": orden.total_estimado or 0.0,
-        "notas": orden.notas or "",
-        "creado": orden.creado,
-        "actualizado": orden.actualizado,
-        "items": [
-            {
-                "id": it.id,
-                "orden_id": it.orden_id,
-                "producto_id": it.producto_id,
-                "producto_nombre": it.producto_nombre or "",
-                "publico": it.publico or "",
-                "genero": it.genero or "",
-                "color": it.color or "",
-                "talla": it.talla or "",
-                "qty": it.qty,
-                "precio_proveedor": it.precio_proveedor or 0.0,
-                "subtotal": it.subtotal or 0.0,
-            }
-            for it in items_out
-        ]
-    }
+    items = await _get_items(db, orden_id)
+    return _orden_to_dict(orden, items)
 
 
 @app.post("/ordenes-compra/{orden_id}/estado", response_model=schemas.OrdenCompraOut)
@@ -439,27 +359,17 @@ async def cambiar_estado_orden(
         if orden.estado not in ("borrador", "enviada"):
             raise HTTPException(status_code=400, detail="Solo se puede confirmar una orden en borrador o enviada")
 
-        items_q = await db.execute(
-            select(models.OrdenCompraItem).where(models.OrdenCompraItem.orden_id == orden_id)
-        )
-        items = items_q.scalars().all()
-
+        items = await _get_items(db, orden_id)
         for it in items:
             if not it.producto_id:
                 continue
-
-            # Obtener el producto
             prod_result = await db.execute(
                 select(models.Producto).where(models.Producto.id == it.producto_id)
             )
             producto = prod_result.scalar_one_or_none()
             if not producto:
                 continue
-
-            # Sumar al stock
             producto.qty += it.qty
-
-            # Crear movimiento de entrada
             mov = models.Movimiento(
                 tipo="entrada",
                 producto_id=it.producto_id,
@@ -476,35 +386,5 @@ async def cambiar_estado_orden(
         await db.commit()
 
     await db.refresh(orden)
-
-    items_q2 = await db.execute(
-        select(models.OrdenCompraItem).where(models.OrdenCompraItem.orden_id == orden_id)
-    )
-    items_final = items_q2.scalars().all()
-
-    return {
-        "id": orden.id,
-        "folio": orden.folio,
-        "proveedor": orden.proveedor or "",
-        "estado": orden.estado,
-        "total_estimado": orden.total_estimado or 0.0,
-        "notas": orden.notas or "",
-        "creado": orden.creado,
-        "actualizado": orden.actualizado,
-        "items": [
-            {
-                "id": it.id,
-                "orden_id": it.orden_id,
-                "producto_id": it.producto_id,
-                "producto_nombre": it.producto_nombre or "",
-                "publico": it.publico or "",
-                "genero": it.genero or "",
-                "color": it.color or "",
-                "talla": it.talla or "",
-                "qty": it.qty,
-                "precio_proveedor": it.precio_proveedor or 0.0,
-                "subtotal": it.subtotal or 0.0,
-            }
-            for it in items_final
-        ]
-    }
+    items_final = await _get_items(db, orden_id)
+    return _orden_to_dict(orden, items_final)
