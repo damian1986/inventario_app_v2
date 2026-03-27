@@ -1,0 +1,4 @@
+CategoriaPadre,Publico,Genero,Manga,Peso,Color,Nombre,SKU,Variantes,Cantidad,StockMin,Costo,PrecioVenta
+"Playera","Adulto","Caballero","Manga Corta","C0300","Aqua","","SKU-AUTO-1","",10,1,150.00,250.00
+"Playera","Adulto","Dama","Manga Corta","C0200","Negro","","SKU-AUTO-2","",5,1,120.00,200.00
+"","","","","","","Taza Custom","SKU-TZ-1","Variante Unica",20,5,50.00,100.00
