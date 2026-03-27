@@ -18,6 +18,7 @@
       <button onclick="showPage('ventas', this)">💰 Registrar Venta</button>
       <button onclick="showPage('historial', this)">🕘 Historial</button>
       <button onclick="showPage('reporte', this)">📊 Reporte</button>
+      <button onclick="showPage('ordenes_compra', this)">🛒 Órdenes de Compra</button>
     </nav>
 
     <!-- INVENTARIO -->
@@ -55,7 +56,6 @@
             <option value="">Todas las categorías</option>
           </select>
           <div id="filter-subcats-container" class="subcat-list d-none">
-            <!-- Checkboxes dinámicos aquí -->
           </div>
         </div>
 
@@ -268,7 +268,22 @@
       </div>
     </div>
 
-    <!-- MODALES -->
+    <!-- ÓRDENES DE COMPRA -->
+    <div class="page" id="page-ordenes_compra">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+        <h2 style="margin:0;">🛒 Órdenes de Compra</h2>
+        <button class="btn btn-primary" onclick="openNuevaOrden()">+ Nueva Orden</button>
+      </div>
+
+      <!-- Listado de órdenes -->
+      <div id="oc-empty" class="empty-state" style="display:none;">
+        <div class="icon">📋</div>
+        <div>Sin órdenes de compra aún.</div>
+      </div>
+      <div id="oc-list"></div>
+    </div>
+
+    <!-- MODALES existentes -->
     <div class="overlay" id="overlay-producto">
       <div class="modal">
         <h2 id="mp-title">Agregar Producto</h2>
@@ -381,19 +396,11 @@
         <h2>Ajuste de Inventario</h2>
         <div class="form-group">
           <label for="aj-nombre">Producto</label
-          ><input
-            type="text"
-            id="aj-nombre"
-            readonly
-          />
+          ><input type="text" id="aj-nombre" readonly />
         </div>
         <div class="form-group">
           <label for="aj-actual">Cantidad actual</label
-          ><input
-            type="number"
-            id="aj-actual"
-            readonly
-          />
+          ><input type="number" id="aj-actual" readonly />
         </div>
         <div class="form-group">
           <label for="aj-nueva">Nueva cantidad *</label
@@ -413,12 +420,8 @@
           <label for="aj-notas">Notas</label><input type="text" id="aj-notas" />
         </div>
         <div class="modal-footer">
-          <button class="btn btn-outline" onclick="closeModal('ajuste')">
-            Cancelar
-          </button>
-          <button class="btn btn-primary" onclick="saveAjuste()">
-            Aplicar
-          </button>
+          <button class="btn btn-outline" onclick="closeModal('ajuste')">Cancelar</button>
+          <button class="btn btn-primary" onclick="saveAjuste()">Aplicar</button>
         </div>
       </div>
     </div>
@@ -437,21 +440,79 @@
           <input type="file" id="csv-file" accept=".csv" aria-label="Archivo CSV para importar" title="Subir Archivo CSV" />
         </div>
         <div class="modal-footer">
-          <button class="btn btn-outline" onclick="closeModal('importar')">
-            Cancelar
-          </button>
-          <button class="btn btn-primary" onclick="procesarImportacionCSV()">
-            Procesar CSV
-          </button>
+          <button class="btn btn-outline" onclick="closeModal('importar')">Cancelar</button>
+          <button class="btn btn-primary" onclick="procesarImportacionCSV()">Procesar CSV</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL ORDEN DE COMPRA -->
+    <div class="overlay" id="overlay-orden_compra">
+      <div class="modal" style="max-width:700px; width:95%;">
+        <h2 id="moc-title">Nueva Orden de Compra</h2>
+
+        <div class="form-row">
+          <div class="form-group" style="flex:2">
+            <label>Proveedor</label>
+            <input type="text" id="moc-proveedor" placeholder="Nombre del proveedor" />
+          </div>
+          <div class="form-group" style="flex:1">
+            <label>Estado</label>
+            <select id="moc-estado">
+              <option value="borrador">Borrador</option>
+              <option value="enviada">Enviada</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Notas</label>
+          <input type="text" id="moc-notas" placeholder="Observaciones generales..." />
+        </div>
+
+        <!-- Sugeridos Low Stock -->
+        <div style="margin-top:15px;">
+          <h4 style="margin:0 0 8px; color:#b45309;">⚠️ Sugeridos (Stock Bajo)</h4>
+          <div id="moc-sugeridos-lista">
+            <div style="color:#aaa; font-size:0.85rem;">Cargando sugeridos...</div>
+          </div>
+        </div>
+
+        <!-- Agregar Manualmente -->
+        <div style="margin-top:18px;">
+          <h4 style="margin:0 0 8px; color:#1d4ed8;">➕ Agregar Producto Manualmente</h4>
+          <div class="form-row">
+            <div class="form-group" style="flex:1">
+              <input type="text" id="moc-buscar" placeholder="Buscar por nombre, color o SKU..." oninput="buscarProductoOC()" />
+            </div>
+          </div>
+          <div id="moc-resultados" style="max-height:160px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px; margin-bottom:10px;"></div>
+        </div>
+
+        <!-- Items de la orden -->
+        <div style="margin-top:10px;">
+          <h4 style="margin:0 0 8px;">📋 Productos en esta Orden</h4>
+          <div id="moc-items-lista" style="max-height:250px; overflow-y:auto;"></div>
+        </div>
+
+        <!-- Totales -->
+        <div style="margin-top:12px; padding:10px; background:#f8fafc; border-radius:6px; display:flex; justify-content:space-between;">
+          <span>Total piezas: <strong id="moc-total-qty">0</strong></span>
+          <span>Total estimado: <strong id="moc-total-precio">$0.00</strong></span>
+        </div>
+
+        <div class="modal-footer" style="margin-top:15px;">
+          <button class="btn btn-outline" onclick="closeModal('orden_compra')">Cancelar</button>
+          <button class="btn btn-warning" onclick="generarPDFOrdenActual()">📄 PDF</button>
+          <button class="btn btn-primary" onclick="guardarOrdenCompra()">💾 Guardar Orden</button>
         </div>
       </div>
     </div>
 
     <div class="toast" id="toast"></div>
 
-    <!-- Scripts -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
     <div class="overlay" id="overlay-edit-venta">
       <div class="modal">
         <h3 id="ev-title">Modificar Venta</h3>
