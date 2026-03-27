@@ -345,7 +345,14 @@ function renderInventario(){
       tbody.appendChild(tr);
 
       if (!isCollapsed) {
-        Object.keys(g.colors).sort().forEach(colorName => {
+        // ── ORDENAR COLORES: mayor existencia primero ──────────────────────
+        const coloresOrdenados = Object.keys(g.colors).sort((a, b) => {
+          const diff = g.colors[b].totalQty - g.colors[a].totalQty;
+          if (diff !== 0) return diff;          // mayor qty primero
+          return a.localeCompare(b, 'es');      // empate → orden alfabético
+        });
+
+        coloresOrdenados.forEach(colorName => {
           const cg = g.colors[colorName];
           const colorKey = `${key}||${colorName}`;
           if (Object.keys(g.colors).length > 1 && !window.collapsedGroups.has(colorKey) && !window.hasInteractedWithGroups) {
@@ -853,7 +860,6 @@ window.generarTicketMulti = function(h) {
         const timestamp = h.fecha ? new Date(h.fecha).getTime() : new Date().getTime();
         const filename = "Ticket_Venta_" + timestamp + ".pdf";
         
-        // Try blob URL approach for better browser compatibility
         try {
           const blob = doc.output('blob');
           const url = URL.createObjectURL(blob);
@@ -865,7 +871,6 @@ window.generarTicketMulti = function(h) {
           document.body.removeChild(a);
           setTimeout(() => URL.revokeObjectURL(url), 1000);
         } catch(dlErr) {
-          // Fallback to jsPDF's native save
           doc.save(filename);
         }
         toast('Ticket PDF generado ✅');
@@ -975,7 +980,6 @@ function generarTicketPDF(h) {
         const timestamp = h.fecha ? new Date(h.fecha).getTime() : new Date().getTime();
         const filename = "Ticket_Venta_" + timestamp + ".pdf";
         
-        // Try blob URL approach for better browser compatibility
         try {
           const blob = doc.output('blob');
           const url = URL.createObjectURL(blob);
@@ -1135,7 +1139,6 @@ window.deleteProducto = deleteProducto;
 window.openAjuste = openAjuste;
 window.saveAjuste = saveAjuste;
 window.onProductoVenta = onProductoVenta;
-// registrarVenta was replaced by the cart system (procesarCobro)
 window.renderHistorial = renderHistorial;
 window.addVariantField = addVariantField;
 window.descargarPlantillaCSV = descargarPlantillaCSV;
@@ -1205,12 +1208,10 @@ function aplicarRopa(e) {
     }
   }
 
-  // Stock Mínimo por defecto para Playeras
   if (padre === 'Playera') {
     document.getElementById('mp-min').value = 2;
   }
   
-  // Generar Prefijo SKU
   const genderCode = { 'Caballero': 'C', 'Dama': 'D', 'Juvenil': 'J', 'Niño': 'N', 'Bebé': 'B', 'Unisex': 'U' };
   const skuPrefix = `P${genderCode[gen] || 'X'}${peso}`;
   const colorSKU = col.toUpperCase().replace(/\s+/g, '');
@@ -1330,7 +1331,6 @@ async function procesarImportacionCSV() {
                else if (pub === 'Adulto' && gen === 'Dama') tallas = ['S', 'M', 'L', 'XL'];
                else tallas = ['S', 'M', 'L', 'XL'];
                
-               // Formato: baseName Peso C0300>Color>Talla (nombre largo)
                variantes = tallas.map(t => `${col || 'Blanco'}>${sizeNames[t] || t}`);
                
                if (padre === 'Playera') rCat = `${padre} › ${pub} › ${gen === 'Unisex' ? 'Unisex' : gen} › ${man}`;
@@ -1416,7 +1416,6 @@ async function renderVentasRecientes() {
       container.innerHTML = '<div class="cart-empty">Sin ventas recientes</div>';
       return;
     }
-    // Agrupar por ticket (notas) si es posible
     vent.forEach(v => {
       const div = document.createElement('div');
       div.className = 'recent-sale-item';
@@ -1452,7 +1451,6 @@ window.cancelarVenta = async function(id) {
 let editingVentaId = null;
 window.modificarVenta = async function(id) {
   try {
-    // Para simplificar, obtenemos el movimiento de la ruta general
     const movs = await req('GET', '/movimientos?limit=50');
     const v = movs.find(x => x.id === id);
     if (!v) { toast('No se encontró el detalle de la venta', false); return; }
