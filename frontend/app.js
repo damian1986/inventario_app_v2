@@ -234,7 +234,7 @@ function renderInventario(){
   });
   const tbody=document.getElementById('inv-body');
   tbody.innerHTML='';
-  const groupKeys = Object.keys(groups).sort();
+  const groupKeys = Object.keys(groups).sort((a, b) => groups[b].totalQty - groups[a].totalQty);
   if(groupKeys.length===0){
     document.getElementById('inv-empty').style.display='block';
     document.getElementById('inv-table').style.display='none';
@@ -1044,8 +1044,7 @@ window.modificarVenta = async function(id) {
 window.confirmUpdateVenta = async function() {
   const qty = parseInt(document.getElementById('ev-qty').value);
   const precio = parseFloat(document.getElementById('ev-precio').value);
-  if (!qty || qty < 1) { toast('Cantidad inválida', false); return; }
-  try {
+  if (!qty || qty < 1) { toast('Cantidad inválida', false); return; }\n  try {
     await req('PUT', `/movimientos/${editingVentaId}`, { qty, precio });
     toast('Venta actualizada correctamente', true);
     closeModal('edit-venta');
