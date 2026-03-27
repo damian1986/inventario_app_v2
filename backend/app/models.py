@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, Text, JSON, For
 from sqlalchemy.sql import func
 from app.database import Base
 
+
 class Producto(Base):
     __tablename__ = "productos"
     id = Column(Integer, primary_key=True, index=True)
@@ -16,6 +17,7 @@ class Producto(Base):
     creado = Column(DateTime(timezone=True), server_default=func.now())
     actualizado = Column(DateTime(timezone=True), onupdate=func.now())
 
+
 class Movimiento(Base):
     __tablename__ = "movimientos"
     id = Column(Integer, primary_key=True, index=True)
@@ -28,3 +30,32 @@ class Movimiento(Base):
     canal = Column(String(100), default="")
     notas = Column(Text, default="")
     fecha = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# ── ÓRDENES DE COMPRA ────────────────────────────────────────────────
+
+class OrdenCompra(Base):
+    __tablename__ = "ordenes_compra"
+    id = Column(Integer, primary_key=True, index=True)
+    folio = Column(String(30), nullable=False, unique=True, index=True)
+    proveedor = Column(String(200), default="")
+    estado = Column(String(20), nullable=False, default="borrador")  # borrador | enviada | confirmada
+    total_estimado = Column(Float, default=0.0)
+    notas = Column(Text, default="")
+    creado = Column(DateTime(timezone=True), server_default=func.now())
+    actualizado = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class OrdenCompraItem(Base):
+    __tablename__ = "ordenes_compra_items"
+    id = Column(Integer, primary_key=True, index=True)
+    orden_id = Column(Integer, ForeignKey("ordenes_compra.id", ondelete="CASCADE"), nullable=False)
+    producto_id = Column(Integer, ForeignKey("productos.id", ondelete="SET NULL"), nullable=True)
+    producto_nombre = Column(String(200), default="")
+    publico = Column(String(50), default="")    # Adulto, Juvenil, Niño, Bebé
+    genero = Column(String(50), default="")     # Caballero, Dama, Unisex
+    color = Column(String(100), default="")
+    talla = Column(String(50), default="")
+    qty = Column(Integer, default=0)
+    precio_proveedor = Column(Float, default=0.0)
+    subtotal = Column(Float, default=0.0)       # qty * precio_proveedor
