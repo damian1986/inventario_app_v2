@@ -311,8 +311,9 @@ function renderInventario(){
       const g = groups[key];
       const hasMultiple = Object.keys(g.colors).length > 1 || Object.values(g.colors)[0].items.length > 1;
       
-      if (hasMultiple && !window.collapsedGroups.has(key) && !window.hasInteractedWithGroups) {
-          window.collapsedGroups.add(key);
+      // Siempre colapsar grupos con múltiples variantes si no han sido expandidos por el usuario
+      if (hasMultiple && !window.collapsedGroups.has(key) && !window.expandedByUser.has(key)) {
+        window.collapsedGroups.add(key);
       }
       const isCollapsed = window.collapsedGroups.has(key);
       
@@ -325,7 +326,7 @@ function renderInventario(){
             <span class="toggle-btn ${isCollapsed ? 'collapsed' : ''}" onclick="toggleGroup('${key.replace(/'/g, "\\'")}')">
               ${isCollapsed ? '▶' : '▼'}
             </span>
-            <div class="parent-name" onclick="toggleGroup('${key.replace(/'/g, "\\'")}')" style="cursor:pointer">
+            <div class="parent-name" onclick="toggleGroup('${key.replace(/'/g, "\\'")}')\" style="cursor:pointer">
               ${renderBreadcrumb(g.baseName, g.categoria)}
             </div>
           </div>
@@ -355,8 +356,9 @@ function renderInventario(){
         coloresOrdenados.forEach(colorName => {
           const cg = g.colors[colorName];
           const colorKey = `${key}||${colorName}`;
-          if (Object.keys(g.colors).length > 1 && !window.collapsedGroups.has(colorKey) && !window.hasInteractedWithGroups) {
-             window.collapsedGroups.add(colorKey);
+          // Siempre colapsar subgrupos de color si no han sido expandidos por el usuario
+          if (Object.keys(g.colors).length > 1 && !window.collapsedGroups.has(colorKey) && !window.expandedByUser.has(colorKey)) {
+            window.collapsedGroups.add(colorKey);
           }
           const isColorCollapsed = window.collapsedGroups.has(colorKey);
           
@@ -374,7 +376,7 @@ function renderInventario(){
                 <span class="toggle-btn ${isColorCollapsed ? 'collapsed' : ''}" onclick="toggleGroup('${colorKey.replace(/'/g, "\\'")}')">
                   ${isColorCollapsed ? '▶' : '▼'}
                 </span>
-                <span class="bc-item bc-color" style="cursor:pointer" onclick="toggleGroup('${colorKey.replace(/'/g, "\\'")}')">${colorName}</span>
+                <span class="bc-item bc-color" style="cursor:pointer" onclick="toggleGroup('${colorKey.replace(/'/g, "\\'")}')\">${colorName}</span>
               </td>
               <td>—</td>
               <td><span style="font-size:0.8rem; color:#888;">${cg.items.length} tallas</span></td>
@@ -433,12 +435,15 @@ function renderInventario(){
   document.getElementById('s-valor').textContent = mxn(val);
 } // end renderInventario
 
+window.expandedByUser = new Set();
+
 window.toggleGroup = function(key) {
-  window.hasInteractedWithGroups = true;
   if (window.collapsedGroups.has(key)) {
     window.collapsedGroups.delete(key);
+    window.expandedByUser.add(key);  // Marcar como expandido por el usuario
   } else {
     window.collapsedGroups.add(key);
+    window.expandedByUser.delete(key);  // Ya no está expandido por el usuario
   }
   renderInventario();
 };
