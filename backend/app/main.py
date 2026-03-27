@@ -1,10 +1,12 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from app.database import get_db, engine
 from app import models, schemas, services
+from app.sku import generar_sku
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -12,7 +14,8 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(models.Base.metadata.create_all)
     yield
 
-app = FastAPI(title="Inventario API", version="1.0.0", lifespan=lifespan)
+
+app = FastAPI(title="Inventario API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,65 +24,91 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── PRODUCTOS ──
+# ── PRODUCTOS ─────────────────────────────────────────────────────────
 @app.get("/productos", response_model=List[schemas.ProductoOut])
-async def listar_productos(db: AsyncSession = Depends(get_db)):
-    return await services.get_all_productos(db)
+async def listar_productos(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db)
+):
+    return await services.get_productos(db, skip=skip, limit=limit)
+
 
 @app.post("/productos", response_model=schemas.ProductoOut, status_code=201)
 async def crear_producto(data: schemas.ProductoCreate, db: AsyncSession = Depends(get_db)):
     return await services.crear_producto(db, data)
 
+
 @app.get("/productos/{id}", response_model=schemas.ProductoOut)
 async def obtener_producto(id: int, db: AsyncSession = Depends(get_db)):
     return await services.get_producto(db, id)
+
 
 @app.put("/productos/{id}", response_model=schemas.ProductoOut)
 async def actualizar_producto(id: int, data: schemas.ProductoUpdate, db: AsyncSession = Depends(get_db)):
     return await services.actualizar_producto(db, id, data)
 
+
 @app.delete("/productos/{id}", status_code=204)
 async def eliminar_producto(id: int, db: AsyncSession = Depends(get_db)):
     await services.eliminar_producto(db, id)
+
 
 @app.patch("/productos/{id}/qty")
 async def cambiar_qty(id: int, delta: int, db: AsyncSession = Depends(get_db)):
     return await services.cambiar_qty(db, id, delta)
 
-# ── VENTAS ──
+
+# ── VENTAS ────────────────────────────────────────────────────────────
 @app.post("/ventas", response_model=schemas.MovimientoOut, status_code=201)
 async def registrar_venta(data: schemas.VentaRequest, db: AsyncSession = Depends(get_db)):
     return await services.registrar_venta(db, data)
 
-# ── AJUSTES ──
+
+# ── AJUSTES ──────────────────────────────────────────────────────────
 @app.post("/productos/{id}/ajuste", response_model=schemas.MovimientoOut)
 async def ajustar_inventario(id: int, data: schemas.AjusteRequest, db: AsyncSession = Depends(get_db)):
     return await services.ajustar_inventario(db, id, data)
 
-# ── HISTORIAL ──
+
+# ── HISTORIAL ────────────────────────────────────────────────────────
 @app.get("/movimientos", response_model=List[schemas.MovimientoOut])
-async def listar_movimientos(tipo: Optional[str] = None, db: AsyncSession = Depends(get_db)):
-    return await services.get_movimientos(db, tipo=tipo)
+async def listar_movimientos(
+    tipo: Optional[str] = None,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: AsyncSession = Depends(get_db)
+):
+    return await services.get_movimientos(db, tipo=tipo, skip=skip, limit=limit)
+
 
 @app.delete("/movimientos/{id}", status_code=204)
 async def eliminar_movimiento(id: int, db: AsyncSession = Depends(get_db)):
     return await services.eliminar_movimiento(db, id)
 
+
 @app.put("/movimientos/{id}", response_model=schemas.MovimientoOut)
 async def actualizar_movimiento(id: int, data: schemas.MovimientoUpdate, db: AsyncSession = Depends(get_db)):
     return await services.actualizar_movimiento(db, id, data)
 
-# ── REPORTE ──
+
+# ── REPORTE ──────────────────────────────────────────────────────────
 @app.get("/reporte")
-async def reporte(desde: Optional[str] = None, hasta: Optional[str] = None, db: AsyncSession = Depends(get_db)):
+async def reporte(
+    desde: Optional[str] = None,
+    hasta: Optional[str] = None,
+    db: AsyncSession = Depends(get_db)
+):
     ventas = await services.get_all_ventas(db, desde=desde, hasta=hasta)
     productos = await services.get_all_productos(db)
-
     prod_map = {p.id: p for p in productos}
     ingresos = sum(v.precio * v.qty for v in ventas)
-    costo_vendido = sum((prod_map[v.producto_id].costo if v.producto_id in prod_map else 0) * v.qty for v in ventas)
+    costo_vendido = sum(
+        (prod_map[v.producto_id].costo if v.producto_id in prod_map else 0) * v.qty
+        for v in ventas
+    )
     unidades = sum(v.qty for v in ventas)
-    top = {}
+    top: dict = {}
     for v in ventas:
         if v.producto_nombre not in top:
             top[v.producto_nombre] = {"qty": 0, "ingresos": 0, "costo": 0}
@@ -93,8 +122,30 @@ async def reporte(desde: Optional[str] = None, hasta: Optional[str] = None, db: 
         "costo_vendido": costo_vendido,
         "ganancia": ingresos - costo_vendido,
         "unidades": unidades,
-        "top_productos": [{"nombre": k, **v} for k, v in top_sorted]
+        "top_productos": [{"nombre": k, **v} for k, v in top_sorted],
     }
+
+
+# ── UTILIDADES ──────────────────────────────────────────────────────
+@app.get("/sku/preview")
+async def preview_sku(
+    categoria: str,
+    nombre: str,
+    variantes: str = "",
+    db: AsyncSession = Depends(get_db),
+):
+    """Devuelve una vista previa del SKU que se generaría sin crear el producto."""
+    lista_variantes = [v.strip() for v in variantes.split(",") if v.strip()]
+    from app.services import _contador_categoria
+    contador = await _contador_categoria(db, categoria)
+    sku = generar_sku(
+        categoria=categoria,
+        nombre=nombre,
+        variantes=lista_variantes,
+        contador=contador,
+    )
+    return {"sku": sku}
+
 
 @app.get("/health")
 def health():
