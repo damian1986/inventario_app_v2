@@ -98,9 +98,9 @@ async def main():
         'S':    'Chica',
         'M':    'Mediana',
         'L':    'Grande',
-        'XL':   'Extragrande',
-        'XXL':  'Extra Extra Grande',
-        'XXXL': 'Extra Extra Extra Grande',
+        'XL':   'X-Grande',
+        'XXL':  'XX-Grande',
+        'XXXL': 'XXX-Grande',
     }
 
     # Contador por categoría para generar_sku (solo se usa en categorías no-Playera)
@@ -115,6 +115,7 @@ async def main():
                 price_data = data['prices'].get(size, {})
 
                 costo  = price_data.get('blancas_mayoreo' if is_white else 'colores_mayoreo', 0)
+                costo_menudeo = price_data.get('blancas_menudeo' if is_white else 'colores_menudeo', 0)
                 precio = 0  # precio de venta vacío; varía por canal
 
                 # Construir nombre completo con el keyword de segmento incrustado
@@ -149,6 +150,7 @@ async def main():
                     nombre=full_name,
                     venta=precio,
                     costo=costo,
+                    costo_menudeo=costo_menudeo,
                     qty=0,
                     min_stock=1,
                     categoria=categoria_jerarquica,

@@ -4,25 +4,266 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Inventario Pro</title>
-    <link rel="stylesheet" href="styles.css" />
+    <!-- Evitar error 404 de favicon -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📦</text></svg>">
+    <!-- CSS -->
+    <link rel="stylesheet" href="styles.css?v=2.0.0" />
+    <!-- External Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/exceljs@4.3.0/dist/exceljs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
   </head>
-  <body>
-    <header>
-      <h1>📦 Inventario Pro</h1>
-      <span class="api-url" id="api-status">🟢 API conectada</span>
-    </header>
-    <nav>
-      <button class="active" onclick="showPage('inventario', this)">
-        📋 Inventario
-      </button>
-      <button onclick="showPage('ventas', this)">💰 Registrar Venta</button>
-      <button onclick="showPage('historial', this)">🕘 Historial</button>
-      <button onclick="showPage('reporte', this)">📊 Reporte</button>
-      <button onclick="showPage('ordenes_compra', this)">🛒 Órdenes de Compra</button>
-    </nav>
+  <body class="loading">
+    <!-- PANTALLA DE LOGIN -->
+    <div id="page-login" class="login-overlay" style="display: none;">
+      <div class="login-card">
+        <div class="login-logo">📦</div>
+        <h2 class="login-title">Inventario Pro</h2>
+        <p class="login-sub">Ingresa tus credenciales para acceder al sistema de gestión inteligente.</p>
+        
+        <div id="login-error" class="login-error" style="display:none;"></div>
+        
+        <div class="form-group">
+          <label for="login-username">Usuario</label>
+          <input type="text" id="login-username" placeholder="Tu nombre de usuario" autocomplete="username">
+        </div>
+        <div class="form-group">
+          <label for="login-password">Contraseña</label>
+          <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password">
+        </div>
+
+        <!-- DUMMY TURNSTILE PARA LOCALHOST -->
+        <div id="turnstile-container" style="margin: 15px 0; display:flex; justify-content:center;">
+          <div style="padding:15px; background:#f9fafb; border:1px solid #e5e7eb; border-radius:8px; width:100%; text-align:center; font-size:0.8rem; color:#666;">
+            🛡️ Verificación de Seguridad (Sesión Local)
+          </div>
+        </div>
+
+        <button id="btn-login" class="btn btn-primary btn-block" onclick="doLogin()">Iniciar Sesión</button>
+        
+        <div class="login-footer">
+          &copy; 2026 Kromo Pinceles · Sistema Protegido
+        </div>
+      </div>
+    </div>
+
+    <!-- PANTALLA DE 2FA (TOTP) -->
+    <div id="page-2fa" class="login-overlay" style="display:none;">
+      <div class="login-card">
+        <div class="login-logo">🔐</div>
+        <h2 class="login-title">Verificación 2FA</h2>
+        <p class="login-sub">El acceso requiere un código de seguridad adicional.</p>
+        
+        <div id="2fa-error" class="login-error" style="display:none;"></div>
+        
+        <div class="form-group">
+          <label for="login-2fa-code">Código de Seguridad (6 dígitos)</label>
+          <input type="text" id="login-2fa-code" placeholder="000000" maxlength="6" inputmode="numeric" style="text-align:center; font-size:1.5rem; letter-spacing:5px;" autocomplete="one-time-code">
+        </div>
+        
+        <button class="btn btn-primary btn-block" onclick="doVerify2FA()">Verificar Código</button>
+        <button class="btn btn-outline btn-block" style="margin-top:10px;" onclick="cancel2FA()">Regresar al Login</button>
+      </div>
+    </div>
+    <div class="app-layout" id="app-layout">
+      <!-- SIDEBAR -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-brand">
+          <div class="sidebar-brand-icon">📦</div>
+          <div class="sidebar-brand-text">
+            <div class="sidebar-brand-name">Inventario Pro</div>
+            <div class="sidebar-brand-sub">Gestión Inteligente</div>
+          </div>
+        </div>
+        <button class="sidebar-collapse-btn" onclick="toggleSidebarCollapse()" title="Colapsar menú">◀</button>
+        <div class="sidebar-divider"></div>
+        
+        <div class="sidebar-section-label">Principal</div>
+        <nav class="sidebar-nav" id="app-nav">
+          <button class="sidebar-item active" onclick="showPage('dashboard', this)" data-tooltip="Dashboard">
+            <div class="sidebar-item-icon">📈</div>
+            <div class="sidebar-item-label">Dashboard</div>
+          </button>
+          <button class="sidebar-item" onclick="showPage('inventario', this)" data-tooltip="Inventario">
+            <div class="sidebar-item-icon">📋</div>
+            <div class="sidebar-item-label">Inventario</div>
+          </button>
+          <button class="sidebar-item" onclick="showPage('ventas', this)" data-tooltip="Registrar Venta">
+            <div class="sidebar-item-icon">💰</div>
+            <div class="sidebar-item-label">Registrar Venta</div>
+          </button>
+          <button class="sidebar-item" id="nav-gestion_ventas" onclick="showPage('gestion_ventas', this)" data-tooltip="Gestión de Ventas">
+            <div class="sidebar-item-icon">🧾</div>
+            <div class="sidebar-item-label">Gestión de Ventas</div>
+          </button>
+          <button class="sidebar-item" id="nav-conteo" onclick="showPage('conteo', this)" data-tooltip="Conteo Físico">
+            <div class="sidebar-item-icon">📦</div>
+            <div class="sidebar-item-label">Conteo Físico</div>
+          </button>
+          <button class="sidebar-item" id="nav-ordenes" onclick="showPage('ordenes_compra', this)" data-tooltip="Órdenes de Compra">
+            <div class="sidebar-item-icon">🛒</div>
+            <div class="sidebar-item-label">Órdenes de Compra</div>
+          </button>
+          
+          <div class="sidebar-divider" style="margin-top: 10px;"></div>
+          <div class="sidebar-section-label">Reportes</div>
+          <button class="sidebar-item" onclick="showPage('historial', this)" data-tooltip="Historial">
+            <div class="sidebar-item-icon">🕘</div>
+            <div class="sidebar-item-label">Historial</div>
+          </button>
+          <button class="sidebar-item" id="nav-reporte" onclick="showPage('reporte', this)" data-tooltip="Reportes">
+            <div class="sidebar-item-icon">📊</div>
+            <div class="sidebar-item-label">Reportes</div>
+          </button>
+          
+          <div class="sidebar-divider" style="margin-top: 10px;"></div>
+          <div class="sidebar-section-label">Gestión Financiera</div>
+          <button class="sidebar-item" id="nav-contabilidad" onclick="showPage('contabilidad', this)" data-role="admin" data-tooltip="Contabilidad">
+            <div class="sidebar-item-icon">💵</div>
+            <div class="sidebar-item-label">Contabilidad</div>
+          </button>
+
+          <div class="sidebar-divider" style="margin-top: 10px;"></div>
+          <div class="sidebar-section-label">⚙️ Administración</div>
+          <button class="sidebar-item" id="nav-logs" onclick="showPage('logs', this)" data-role="admin" data-tooltip="Auditoría">
+            <div class="sidebar-item-icon">📜</div>
+            <div class="sidebar-item-label">Auditoría</div>
+          </button>
+          <button class="sidebar-item" id="nav-usuarios" onclick="showPage('usuarios', this)" data-role="admin" data-tooltip="Usuarios">
+            <div class="sidebar-item-icon">👥</div>
+            <div class="sidebar-item-label">Usuarios</div>
+          </button>
+          <button class="sidebar-item" id="nav-descuentos" onclick="showPage('descuentos', this)" data-role="admin" data-tooltip="Descuentos">
+            <div class="sidebar-item-icon">🏷️</div>
+            <div class="sidebar-item-label">Descuentos</div>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="sidebar-user-badge">
+            <div class="sidebar-user-avatar" id="sidebar-avatar">A</div>
+            <div class="sidebar-user-info">
+              <div class="sidebar-user-name" id="sidebar-name">Nombre</div>
+              <div class="sidebar-user-role" id="sidebar-role">Rol</div>
+            </div>
+          </div>
+          <div style="margin-top:12px; display:flex; gap:8px;">
+            <button class="btn btn-sm btn-outline" style="flex:1; padding:5px; font-size:0.75rem" onclick="if(window.open2FASetup) open2FASetup()" title="Configurar 2FA">🔐 2FA</button>
+            <button class="btn btn-sm btn-outline" style="flex:1; padding:5px; font-size:0.75rem; color:#ef4444; border-color:#fca5a5;" onclick="sessionStorage.clear(); localStorage.clear(); window.location.reload();" title="Cerrar sesión">🚪 Salir</button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- MAIN WRAPPER -->
+      <div class="main-wrapper">
+        <header id="app-header">
+          <button class="sidebar-mobile-toggle" onclick="toggleSidebarMenu()" aria-label="Abrir menú">☰</button>
+          <h1 style="display:none;">📦 Inventario Pro</h1>
+          <div style="flex:1"></div>
+          <!-- BOTÓN DE NOTIFICACIONES (Sincronizado con app.js:toggleNotifications) -->
+          <div class="nav-bell" onclick="toggleNotifications()" style="position:relative; cursor:pointer; margin-right:8px; font-size:1.5rem; display:flex; align-items:center;">
+             🔔
+             <span id="bell-badge" style="display:none; position:absolute; top:-5px; right:-5px; background:#ef4444; color:white; font-size:0.65rem; padding:2px 5px; border-radius:10px; font-weight:bold; border:2px solid white;">0</span>
+          </div>
+          <!-- BOTÓN DE ATAJOS (Junto a la campanita) -->
+          <button id="shortcuts-fab" class="header-shortcuts-btn" onclick="toggleShortcutsPanel()" title="Atajos de teclado (?)">
+            ⌨️
+          </button>
+          <span class="api-url" id="api-status">🟢 API conectada</span>
+        </header>
+
+        <main class="main-content">
+
+    <!-- DASHBOARD -->
+    <div class="page active" id="page-dashboard">
+      <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:15px;">
+        <h2 style="margin:0;">Resumen del Negocio</h2>
+        <div id="dash-clock" style="font-weight:600; color:#475569; font-size:0.95rem; background:white; padding:6px 16px; border-radius:20px; border:1px solid #e2e8f0; box-shadow:0 1px 2px rgba(0,0,0,0.05); letter-spacing:0.5px;">--:--</div>
+      </div>
+      <div class="dash-kpis">
+        <div class="dash-kpi-card">
+          <div class="dash-kpi-icon dash-kpi-icon-purple">
+            💰
+          </div>
+          <div class="dash-kpi-info">
+            <div class="dash-kpi-label">Ventas Hoy (MXN)</div>
+            <div class="dash-kpi-value" id="kpi-ventas-hoy">—</div>
+            <div class="dash-kpi-sub" id="kpi-ventas-hoy-uds">0 unidades</div>
+          </div>
+        </div>
+        <div class="dash-kpi-card">
+          <div class="dash-kpi-icon dash-kpi-icon-green">
+            📦
+          </div>
+          <div class="dash-kpi-info">
+            <div class="dash-kpi-label">Ventas del Mes (MXN)</div>
+            <div class="dash-kpi-value" id="kpi-ventas-mes">—</div>
+            <div class="dash-kpi-sub" id="kpi-ventas-mes-uds">0 unidades</div>
+          </div>
+        </div>
+        <div class="dash-kpi-card">
+          <div class="dash-kpi-icon dash-kpi-icon-blue">
+            📊
+          </div>
+          <div class="dash-kpi-info">
+            <div class="dash-kpi-label">Margen Promedio</div>
+            <div class="dash-kpi-value" id="kpi-margen">—</div>
+            <div class="dash-kpi-sub" id="kpi-margen-detalle">$0 neto</div>
+          </div>
+        </div>
+        <div class="dash-kpi-card clickable-kpi" onclick="abrirModalAlertas()">
+          <div class="dash-kpi-icon dash-kpi-icon-amber">
+            ⚠️
+          </div>
+          <div class="dash-kpi-info">
+            <div class="dash-kpi-label">Productos en Alerta</div>
+            <div class="dash-kpi-value" id="kpi-alertas">—</div>
+            <div class="dash-kpi-sub" id="kpi-alertas-detalle">0 sin stock</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dash-grid">
+        <!-- Gráfica de Ventas -->
+        <div class="dash-chart-card dash-chart-wide">
+          <div class="dash-chart-header">
+            <h3>📈 Ventas por Período</h3>
+            <div class="dash-periodo-group">
+              <button class="dash-periodo-btn active" data-periodo="7d" onclick="cambiarPeriodoDash('7d')">7 Días</button>
+              <button class="dash-periodo-btn" data-periodo="30d" onclick="cambiarPeriodoDash('30d')">30 Días</button>
+              <button class="dash-periodo-btn" data-periodo="90d" onclick="cambiarPeriodoDash('90d')">3 Meses</button>
+            </div>
+          </div>
+          <div class="dash-chart-body" style="height:300px;">
+            <canvas id="chart-ventas"></canvas>
+          </div>
+        </div>
+
+        <!-- Top 10 Productos -->
+        <div class="dash-chart-card">
+          <div class="dash-chart-header">
+            <h3>🏆 Top 10 Productos</h3>
+          </div>
+          <div class="dash-chart-body" style="height:320px;">
+            <canvas id="chart-top"></canvas>
+            <div id="chart-top-empty" style="display:none;text-align:center;color:#aaa;padding:40px;">Sin datos de ventas</div>
+          </div>
+        </div>
+
+        <!-- Distribución de Inventario -->
+        <div class="dash-chart-card">
+          <div class="dash-chart-header">
+            <h3>🧩 Distribución de Inventario</h3>
+          </div>
+          <div class="dash-chart-body" style="height:320px;display:flex;align-items:center;justify-content:center;">
+            <canvas id="chart-inventario"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- INVENTARIO -->
-    <div class="page active" id="page-inventario">
+    <div class="page" id="page-inventario">
       <div class="stats">
         <div class="stat-card">
           <div class="label">Productos</div>
@@ -31,6 +272,10 @@
         <div class="stat-card green">
           <div class="label">En Stock</div>
           <div class="value" id="s-stock">—</div>
+        </div>
+        <div class="stat-card blue">
+          <div class="label">Unidades Disp.</div>
+          <div class="value" id="s-unidades">—</div>
         </div>
         <div class="stat-card warn">
           <div class="label">Stock Bajo ⚠️</div>
@@ -78,6 +323,9 @@
           + Producto
         </button>
         <button class="btn btn-success" onclick="exportCSV()">⬇ CSV</button>
+        <button class="btn btn-primary" id="btn-export-excel" style="background:#10B981; border:none;" onclick="exportExcel()">
+          📥 Excel (Color)
+        </button>
       </div>
       <table id="inv-table">
         <thead>
@@ -128,7 +376,7 @@
           <div class="form-row">
             <div class="form-group">
               <label for="v-scan-sku">Código SKU (Escáner)</label>
-              <input type="text" id="v-scan-sku" aria-label="Escanear SKU" title="Escanear SKU" placeholder="Ej: PLAYERA-S" oninput="if(window.onBuscarSKU) onBuscarSKU(this.value)" />
+              <input type="text" id="v-scan-sku" aria-label="Escanear SKU" title="Escanear SKU" placeholder="Ej: PLAYERA-S" oninput="if(window.onBuscarSKU) onBuscarSKU(this.value)" onkeydown="if(event.key==='Enter' && window.onScannerEnter) { event.preventDefault(); onScannerEnter(this.value); }" />
             </div>
             <div class="form-group">
               <label for="v-filtro-cat">Filtrar por Categoría / Nombre</label>
@@ -163,7 +411,20 @@
           <div id="cart-list" class="cart-area">
              <div class="cart-empty">Carrito vacío</div>
           </div>
-          <div class="cart-tot-row">
+
+          <!-- SECCIÓN DE CUPONES -->
+          <div class="form-group" style="display:flex; gap:8px; margin-top: 15px; margin-bottom: 5px;">
+            <input type="text" id="v-cupon" placeholder="Código de descuento" aria-label="Código Cupón" title="Ingresar cupón" style="flex:1" onkeydown="if(event.key==='Enter') { event.preventDefault(); aplicarDescuentoPOS(); }" />
+            <button class="btn btn-sm btn-outline" style="white-space:nowrap;" onclick="aplicarDescuentoPOS()">Aplicar</button>
+          </div>
+          <div id="cupon-aplicado" style="display:none; background:rgba(16,185,129,0.1); border:1px solid rgba(16,185,129,0.3); border-radius:6px; padding:8px 12px; margin-bottom:15px; justify-content:space-between; align-items:center;">
+          </div>
+
+          <div class="cart-tot-row" style="margin-top: 5px; font-size: 0.9em; color: #666; display: flex; justify-content: space-between;">
+             <span>Subtotal:</span>
+             <span id="cart-subtotal">$0.00</span>
+          </div>
+          <div class="cart-tot-row" style="margin-top: 5px;">
              <span>Total:</span>
              <span id="cart-total">$0.00</span>
           </div>
@@ -187,11 +448,90 @@
           </button>
         </div>
 
-        <div class="sales-card card-flush recent-sales-card">
+        <div class="sales-card card-flush recent-sales-card" style="min-height: 650px;">
           <h3 class="section-title">📊 Ventas Recientes</h3>
-          <div id="recent-sales-list" class="recent-sales-area">
+          <div id="recent-sales-list" class="recent-sales-area" style="max-height: 650px; overflow-y: auto; padding-right: 5px;">
              <div class="cart-empty">Cargando ventas...</div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- GESTIÓN DE VENTAS -->
+    <div class="page" id="page-gestion_ventas">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+        <h2 style="margin:0;">Auditoría y Gestión de Ventas</h2>
+        <div id="gv-kpis" style="display:flex; gap:15px;">
+          <div class="mini-kpi-card" style="background:rgba(255,255,255,0.7); border:1px solid rgba(226,232,240,0.8); border-radius:10px; padding:6px 12px; font-size:0.8rem; text-align:center;">
+            <div style="color:#64748b; font-weight:600;">Ventas</div>
+            <div id="gv-kpi-count" style="font-weight:bold; color:#0f172a; font-size:1.1rem;">0</div>
+          </div>
+          <div class="mini-kpi-card" style="background:rgba(255,255,255,0.7); border:1px solid rgba(226,232,240,0.8); border-radius:10px; padding:6px 12px; font-size:0.8rem; text-align:center;">
+            <div style="color:#64748b; font-weight:600;">Facturado</div>
+            <div id="gv-kpi-total" style="font-weight:bold; color:#10b981; font-size:1.1rem;">$0.00</div>
+          </div>
+          <div class="mini-kpi-card" style="background:rgba(255,255,255,0.7); border:1px solid rgba(226,232,240,0.8); border-radius:10px; padding:6px 12px; font-size:0.8rem; text-align:center;">
+            <div style="color:#64748b; font-weight:600;">Promedio</div>
+            <div id="gv-kpi-avg" style="font-weight:bold; color:#3b82f6; font-size:1.1rem;">$0.00</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Barra de Filtros -->
+      <div class="toolbar" style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; background:rgba(255,255,255,0.6); padding:12px; border-radius:12px; border:1px solid rgba(226,232,240,0.8); margin-bottom:15px; backdrop-filter:blur(8px);">
+        <div class="form-group" style="flex:1; min-width:200px; margin-bottom:0;">
+          <input type="text" id="gv-search" placeholder="🔍 Buscar por Folio, SKU o Producto..." style="width:100%;" onkeyup="if(event.key==='Enter') buscarVentasAgrupadas()">
+        </div>
+        <div class="form-group" style="width:150px; margin-bottom:0;">
+          <select id="gv-canal" style="width:100%;">
+            <option value="">-- Canal --</option>
+            <option value="Todos">Todos</option>
+            <option value="Venta directa">Venta directa</option>
+            <option value="Amazon MX">Amazon MX</option>
+            <option value="Mercado Libre">Mercado Libre</option>
+            <option value="Amazon USA">Amazon USA</option>
+            <option value="Amazon CA">Amazon CA</option>
+            <option value="Otro">Otro</option>
+          </select>
+        </div>
+        <div style="display:flex; gap:5px; align-items:center;">
+          <span style="font-size:0.75rem; color:#475569; font-weight:600;">Desde:</span>
+          <input type="date" id="gv-desde" style="width:130px; padding:6px; font-size:0.8rem; border-radius:6px; border:1px solid #cbd5e1;">
+        </div>
+        <div style="display:flex; gap:5px; align-items:center;">
+          <span style="font-size:0.75rem; color:#475569; font-weight:600;">Hasta:</span>
+          <input type="date" id="gv-hasta" style="width:130px; padding:6px; font-size:0.8rem; border-radius:6px; border:1px solid #cbd5e1;">
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="buscarVentasAgrupadas()">Filtrar</button>
+        <button class="btn btn-outline btn-sm" onclick="limpiarFiltrosVentasAgrupadas()">Limpiar</button>
+      </div>
+
+      <!-- Tabla Principal -->
+      <div class="table-container shadow-sm" style="border-radius:12px; overflow:hidden; background:white; border:1px solid #e2e8f0; margin-bottom:15px;">
+        <table style="width:100%; border-collapse:collapse; text-align:left;" id="gv-table">
+          <thead>
+            <tr style="background:#f8fafc; border-bottom:1px solid #e2e8f0; color:#475569; font-size:0.8rem; font-weight:bold;">
+              <th style="padding:12px; width:40px;"></th>
+              <th style="padding:12px;">Folio</th>
+              <th style="padding:12px;">Fecha y Hora</th>
+              <th style="padding:12px;">Canal</th>
+              <th style="padding:12px; text-align:center;">Artículos</th>
+              <th style="padding:12px; text-align:right;">Total</th>
+              <th style="padding:12px; text-align:right; width:220px;">Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="gv-table-body" style="font-size:0.85rem; color:#334155;">
+            <!-- Renderizado dinámico -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Paginación -->
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span style="font-size:0.8rem; color:#64748b;" id="gv-pagination-info">Mostrando ventas...</span>
+        <div style="display:flex; gap:10px;">
+          <button class="btn btn-outline btn-sm" id="btn-gv-prev" onclick="cambiarPaginaVentas(-1)">◀ Anterior</button>
+          <button class="btn btn-outline btn-sm" id="btn-gv-next" onclick="cambiarPaginaVentas(1)">Siguiente ▶</button>
         </div>
       </div>
     </div>
@@ -270,9 +610,18 @@
 
     <!-- ÓRDENES DE COMPRA -->
     <div class="page" id="page-ordenes_compra">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
         <h2 style="margin:0;">🛒 Órdenes de Compra</h2>
-        <button class="btn btn-primary" onclick="openModal('orden_compra')">+ Nueva Orden</button>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <select id="oc-filter-estado" class="form-control" title="Filtrar Órdenes de Compra por Estado" aria-label="Filtrar por estado" onchange="renderOrdenesCompra()" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc;">
+            <option value="">Todas</option>
+            <option value="borrador">Borradores</option>
+            <option value="enviada">Enviadas</option>
+            <option value="confirmada">Confirmadas</option>
+            <option value="cancelada">Canceladas</option>
+          </select>
+          <button class="btn btn-primary" onclick="openNuevaOrden()">+ Nueva Orden</button>
+        </div>
       </div>
 
       <!-- Listado de órdenes -->
@@ -282,6 +631,291 @@
       </div>
       <div id="oc-list"></div>
     </div>
+
+    <!-- CONTABILIDAD -->
+    <div class="page" id="page-contabilidad">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+        <h2 style="margin:0;">💵 Contabilidad</h2>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <input type="month" id="conta-mes" class="form-control" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc;" onchange="renderContabilidad()">
+          <button class="btn btn-outline" onclick="openModalInsumos()">📦 Catálogo Insumos</button>
+          <button class="btn btn-primary" onclick="openModalContabilidad('ingreso')">+ Registrar Ingreso</button>
+          <button class="btn btn-danger" onclick="openModalContabilidad('egreso')">- Registrar Gasto Manual</button>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat-card green">
+          <div class="label">Ingresos del Mes</div>
+          <div class="value" id="conta-ingresos">$0.00</div>
+        </div>
+        <div class="stat-card red">
+          <div class="label">Gastos del Mes</div>
+          <div class="value" id="conta-egresos">$0.00</div>
+        </div>
+        <div class="stat-card blue">
+          <div class="label">Balance Total</div>
+          <div class="value" id="conta-balance">$0.00</div>
+        </div>
+      </div>
+
+      <div class="table-container shadow-sm" style="border-radius:12px; overflow:hidden; background:white; border:1px solid #e2e8f0; margin-top: 15px;">
+        <table style="width:100%; border-collapse:collapse; text-align:left;" id="conta-table">
+          <thead>
+            <tr style="background:#f8fafc; border-bottom:1px solid #e2e8f0; color:#475569; font-size:0.8rem; font-weight:bold;">
+              <th style="padding:12px;">Fecha</th>
+              <th style="padding:12px;">Tipo</th>
+              <th style="padding:12px;">Concepto</th>
+              <th style="padding:12px;">Procedencia / Destino</th>
+              <th style="padding:12px;">Referencia</th>
+              <th style="padding:12px; text-align:right;">Monto</th>
+            </tr>
+          </thead>
+          <tbody id="conta-body" style="font-size:0.85rem; color:#334155;">
+            <!-- Renderizado dinámico -->
+          </tbody>
+        </table>
+      </div>
+      <div id="conta-empty" class="empty-state" style="display:none;">
+        <div class="icon">💰</div>
+        <div>No hay transacciones registradas este mes.</div>
+      </div>
+    </div>
+
+    <!-- CONTEO FÍSICO -->
+    <div class="page" id="page-conteo">
+      <div class="stats">
+        <div class="stat-card">
+          <div class="label">Total Escaneado</div>
+          <div class="value" id="c-total-qty">0</div>
+        </div>
+        <div class="stat-card warn">
+          <div class="label">Diferencias Detectadas</div>
+          <div class="value" id="c-diferencias">0</div>
+        </div>
+      </div>
+      
+      <div class="sales-card card-flush">
+        <h3 class="section-title">📦 Terminal de Conteo Físico (Ciego)</h3>
+        <p style="font-size:0.85rem; color:#666; margin-bottom:15px;">Escanea los productos para validar el stock real contra el sistema.</p>
+        
+        <div class="form-row">
+          <div class="form-group" style="flex:2">
+            <label for="c-scan-sku">Escanear Código (SKU / Barcode) 🔫</label>
+            <input type="text" id="c-scan-sku" placeholder="Apunta y dispara el escáner..." onkeydown="if(event.key==='Enter') onScannerEnterConteo(this.value)">
+          </div>
+          <div class="form-group">
+            <label for="c-qty">Sumar Cantidad</label>
+            <input type="number" id="c-qty" value="1" min="1">
+          </div>
+          <div class="form-group" style="align-self:flex-end;">
+            <button class="btn btn-primary" onclick="sumarConteoManual()">➕ Sumar</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="inventory-card" style="margin-top:20px;">
+        <div id="conteo-list" class="cart-area" style="min-height:300px;">
+          <div class="cart-empty">Aún no has escaneado ningún producto</div>
+        </div>
+      </div>
+
+      <div class="modal-footer" style="background:white; padding:20px; border-radius:12px; margin-top:20px; box-shadow: var(--shadow-sm);">
+        <button class="btn btn-outline" onclick="limpiarConteo()">🗑️ Reiniciar Sesión</button>
+        <button class="btn btn-success" onclick="procesarConteoFisico()">✅ Finalizar y Ajustar Inventario</button>
+      </div>
+    </div>
+
+    <!-- USUARIOS -->
+    <div class="page" id="page-usuarios">
+      <div class="toolbar">
+        <h2 style="margin:0;">👥 Gestión de Usuarios</h2>
+        <button class="btn btn-primary" onclick="openModalUsuario()">+ Nuevo Usuario</button>
+      </div>
+      <table id="users-table">
+        <thead>
+          <tr>
+            <th>Nombre</th>
+            <th>Usuario</th>
+            <th>Email</th>
+            <th>Rol</th>
+            <th>Estado</th>
+            <th>2FA</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="users-body"></tbody>
+      </table>
+    </div>
+
+    <!-- AUDITORÍA (ACTIVIDAD + RESPALDOS) -->
+    <div class="page" id="page-logs">
+      <div class="toolbar">
+        <h2 style="margin:0;">📜 Auditoría de Actividad</h2>
+        <button class="btn btn-outline" onclick="exportAuditCSV()">⬇️ Exportar CSV</button>
+      </div>
+
+      <div class="audit-tabs">
+        <button class="audit-tab active" data-tab="logs" onclick="switchAuditTab('logs', this)">📋 Registros</button>
+        <button class="audit-tab" data-tab="backups" onclick="switchAuditTab('backups', this)">💾 Respaldos</button>
+      </div>
+
+      <!-- PANEL: REGISTROS DE ACTIVIDAD -->
+      <div id="audit-tab-logs">
+        <div class="audit-kpis">
+          <div class="audit-kpi">
+            <div class="audit-kpi-icon purple">📊</div>
+            <div class="audit-kpi-info">
+              <div class="audit-kpi-label">Eventos Totales</div>
+              <div class="audit-kpi-value" id="ak-total">0</div>
+            </div>
+          </div>
+          <div class="audit-kpi">
+            <div class="audit-kpi-icon blue">🔓</div>
+            <div class="audit-kpi-info">
+              <div class="audit-kpi-label">Logins Hoy</div>
+              <div class="audit-kpi-value" id="ak-logins">0</div>
+            </div>
+          </div>
+          <div class="audit-kpi">
+            <div class="audit-kpi-icon green">⚡</div>
+            <div class="audit-kpi-info">
+              <div class="audit-kpi-label">Acciones Hoy</div>
+              <div class="audit-kpi-value" id="ak-acciones">0</div>
+            </div>
+          </div>
+          <div class="audit-kpi">
+            <div class="audit-kpi-icon amber">✏️</div>
+            <div class="audit-kpi-info">
+              <div class="audit-kpi-label">Cambios de Precio (7 días)</div>
+              <div class="audit-kpi-value" id="ak-ediciones">0</div>
+            </div>
+          </div>
+          <div class="audit-kpi">
+            <div class="audit-kpi-icon teal">👥</div>
+            <div class="audit-kpi-info">
+              <div class="audit-kpi-label">Usuarios Activos Hoy</div>
+              <div class="audit-kpi-value" id="ak-usuarios">0</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="toolbar" style="flex-wrap:wrap;">
+          <select id="log-filter-user" onchange="applyLogFilters()" style="max-width:180px;">
+            <option value="">Todos los usuarios</option>
+          </select>
+          <select id="log-filter-accion" onchange="applyLogFilters()" style="max-width:220px;">
+            <option value="">Todas las acciones</option>
+            <optgroup label="Productos">
+              <option value="CREAR_PRODUCTO">Crear Producto</option>
+              <option value="EDITAR_PRODUCTO">Editar Producto</option>
+              <option value="ELIMINAR_PRODUCTO">Eliminar Producto</option>
+              <option value="CAMBIAR_QTY">Cambiar Cantidad</option>
+              <option value="AJUSTAR_INVENTARIO">Ajustar Inventario</option>
+            </optgroup>
+            <optgroup label="Ventas">
+              <option value="REGISTRAR_VENTA">Registrar Venta</option>
+              <option value="CANCELAR_VENTA">Cancelar Venta</option>
+              <option value="DEVOLUCION_PARCIAL">Devolución Parcial</option>
+            </optgroup>
+            <optgroup label="Descuentos">
+              <option value="CREAR_DESCUENTO">Crear Descuento</option>
+              <option value="EDITAR_DESCUENTO">Editar Descuento</option>
+              <option value="ELIMINAR_DESCUENTO">Eliminar Descuento</option>
+            </optgroup>
+            <optgroup label="Órdenes de Compra">
+              <option value="DUPLICAR_OC">Duplicar Orden de Compra</option>
+            </optgroup>
+            <optgroup label="Usuarios y Sistema">
+              <option value="LOGIN">Login</option>
+              <option value="CREAR_USUARIO">Crear Usuario</option>
+              <option value="EDITAR_USUARIO">Editar Usuario</option>
+              <option value="ELIMINAR_USUARIO">Eliminar Usuario</option>
+              <option value="CAMBIO_PASSWORD_AJENO">Cambio de Contraseña</option>
+              <option value="CREAR_BACKUP">Crear Respaldo</option>
+              <option value="RESTAURAR_BACKUP">Restaurar Respaldo</option>
+              <option value="ELIMINAR_BACKUP">Eliminar Respaldo</option>
+            </optgroup>
+          </select>
+          <input type="date" id="log-filter-desde" onchange="applyLogFilters()" title="Desde">
+          <input type="date" id="log-filter-hasta" onchange="applyLogFilters()" title="Hasta">
+          <button class="btn btn-outline" onclick="resetLogFilters()">✖ Limpiar</button>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Fecha</th>
+              <th>Usuario</th>
+              <th>Acción</th>
+              <th>Recurso</th>
+              <th>Detalles</th>
+            </tr>
+          </thead>
+          <tbody id="log-body"></tbody>
+        </table>
+        <div class="empty-state" id="log-empty" style="display:none;">
+          <div class="icon">📭</div>
+          <div>No hay registros que coincidan con los filtros.</div>
+        </div>
+
+        <div id="log-pagination" style="display:none; justify-content:center; align-items:center; gap:14px; margin-top:18px;">
+          <button class="btn btn-outline" onclick="auditPagPrev()">‹ Anterior</button>
+          <span id="log-page-info" style="font-size:0.85rem; font-weight:600; color:var(--on-surface-variant);">Página 1</span>
+          <button class="btn btn-outline" onclick="auditPagNext()">Siguiente ›</button>
+        </div>
+      </div>
+
+      <!-- PANEL: RESPALDOS -->
+      <div id="audit-tab-backups" style="display:none;">
+        <div class="toolbar">
+          <h3 style="margin:0;">💾 Respaldos de Base de Datos</h3>
+          <button class="btn btn-primary" id="btn-generar-backup" onclick="generarBackup(event)">➕ Generar Respaldo Ahora</button>
+        </div>
+        <div id="backups-list" class="backup-grid"></div>
+        <div id="backups-empty" class="empty-state" style="display:none;">
+          <div class="icon">📂</div>
+          <div>No hay archivos de respaldo detectados</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DESCUENTOS / CUPONES -->
+    <div class="page" id="page-descuentos">
+      <div class="stats">
+        <div class="stat-card green">
+          <div class="label">Cupones Activos</div>
+          <div class="value" id="d-total">0</div>
+        </div>
+      </div>
+      <div class="toolbar">
+        <input type="text" id="d-search" placeholder="🔍 Buscar cupón..." oninput="renderDescuentos()">
+        <button class="btn btn-primary" onclick="openModal('descuento')">+ Nuevo Cupón</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Código</th>
+            <th>Tipo</th>
+            <th>Valor</th>
+            <th>Mín. Items</th>
+            <th>Barcode</th>
+            <th>Estado</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="d-body"></tbody>
+      </table>
+      <div class="empty-state" id="d-empty" style="display:none;">
+        <div class="icon">🏷️</div>
+        <div>No hay cupones registrados aún.</div>
+      </div>
+    </div>
+
+        </main> <!-- /main-content -->
+      </div> <!-- /main-wrapper -->
+    </div> <!-- /app-layout -->
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebarMenu()"></div>
 
     <!-- MODALES existentes -->
     <div class="overlay" id="overlay-producto">
@@ -365,14 +999,31 @@
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label for="mp-costo">Precio costo ($MXN)</label
+            <label for="mp-costo">Precio Mayoreo ($MXN)</label
             ><input type="number" id="mp-costo" min="0" step="0.01" value="0" />
           </div>
           <div class="form-group">
-            <label for="mp-venta">Precio venta ($MXN)</label
+            <label for="mp-costo-menudeo">Precio Menudeo ($MXN)</label
+            ><input type="number" id="mp-costo-menudeo" min="0" step="0.01" value="0" />
+          </div>
+          <div class="form-group">
+            <label for="mp-venta">Precio Venta ($MXN)</label
             ><input type="number" id="mp-venta" min="0" step="0.01" value="0" />
           </div>
         </div>
+        <!-- NOTAS INTERNAS Y PROVEEDORES ALTERNATIVOS -->
+        <div class="product-notes-section">
+          <div class="notes-section-header">📝 Notas y Proveedores</div>
+          <div class="form-group">
+            <label for="mp-notas-internas">Notas Internas</label>
+            <textarea id="mp-notas-internas" rows="3" placeholder="Ej: Este color azul en verano se retrasa 3 semanas por proveedor A..."></textarea>
+          </div>
+          <div class="form-group">
+            <label for="mp-proveedores-alt">Proveedores Alternativos</label>
+            <textarea id="mp-proveedores-alt" rows="2" placeholder="Ej: Proveedor B (tel. 555-1234), Proveedor C (entrega 1 semana)"></textarea>
+          </div>
+        </div>
+
         <div class="form-group">
           <label>Variantes (talla, color, modelo...)</label>
           <div class="variants-list" id="variants-list"></div>
@@ -390,6 +1041,67 @@
         </div>
       </div>
     </div>
+
+    <!-- ===== MODAL: AGREGAR VARIANTE RÁPIDA ===== -->
+    <div class="overlay" id="overlay-variante-rapida">
+      <div class="modal" style="max-width:520px;">
+        <h2 id="vr-title">➕ Agregar Variante</h2>
+        <div id="vr-context-info" style="background:rgba(99,102,241,0.08); border:1px solid rgba(99,102,241,0.2); border-radius:8px; padding:10px 14px; margin-bottom:16px; font-size:0.88rem; color:#94a3b8;">
+          <strong id="vr-parent-name" style="color:#c4b5fd;"></strong>
+          <span id="vr-parent-desc"></span>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group" style="flex:2;">
+            <label for="vr-nombre"><span id="vr-label-nombre">Color</span> <span style="color:#f87171;">*</span></label>
+            <input type="text" id="vr-nombre" placeholder="Ej: Negro, Rojo Vino..." autocomplete="off" />
+          </div>
+          <div class="form-group" style="flex:1;">
+            <label for="vr-sku">SKU</label>
+            <input type="text" id="vr-sku" placeholder="Auto" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="vr-qty">Cantidad en existencia <span style="color:#f87171;">*</span></label>
+            <input type="number" id="vr-qty" min="0" value="0" placeholder="0" />
+          </div>
+          <div class="form-group">
+            <label for="vr-min">Stock mínimo</label>
+            <input type="number" id="vr-min" min="0" value="2" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="vr-costo">Precio costo ($MXN)</label>
+            <input type="number" id="vr-costo" min="0" step="0.01" value="0" />
+          </div>
+          <div class="form-group">
+            <label for="vr-venta">Precio venta ($MXN) <span style="color:#f87171;">*</span></label>
+            <input type="number" id="vr-venta" min="0" step="0.01" value="0" />
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top:4px;">
+          <label for="vr-categoria">Categoría <span style="color:#888; font-size:0.8rem;">(heredada)</span></label>
+          <input type="text" id="vr-categoria" readonly style="opacity:0.6; cursor:not-allowed;" />
+        </div>
+
+        <div id="vr-preview-box" style="background:rgba(16,185,129,0.07); border:1px solid rgba(16,185,129,0.2); border-radius:8px; padding:8px 14px; margin:12px 0; font-size:0.85rem; color:#6ee7b7; display:none;">
+          <strong>📦 Nombre resultante:</strong> <span id="vr-preview-nombre" style="color:#a7f3d0;"></span>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="closeModal('variante-rapida')">Cancelar</button>
+          <button class="btn btn-primary" onclick="guardarVarianteRapida()" id="vr-btn-guardar">
+            ✅ Crear Variante
+          </button>
+        </div>
+      </div>
+    </div>
+
 
     <div class="overlay" id="overlay-ajuste">
       <div class="modal">
@@ -453,6 +1165,14 @@
 
         <div class="form-row">
           <div class="form-group" style="flex:2">
+            <label>Tipo de Compra</label>
+            <select id="moc-tipo-compra" onchange="if(window.onChangeTipoCompraOC) onChangeTipoCompraOC()">
+              <option value="ropa">Ropa / Inventario General</option>
+              <option value="insumos">Insumos (Consumibles)</option>
+              <option value="equipos">Equipos / Herramientas</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex:2" id="moc-proveedor-container">
             <label>Proveedor</label>
             <input type="text" id="moc-proveedor" placeholder="Nombre del proveedor" />
           </div>
@@ -464,28 +1184,109 @@
             </select>
           </div>
         </div>
+        
+        <div class="form-row moc-equipo-fields" style="display:none;">
+          <div class="form-group" style="flex:1">
+            <label>Marca (Equipos)</label>
+            <input type="text" id="moc-marca" placeholder="Ej: Epson, Brother..." />
+          </div>
+          <div class="form-group" style="flex:1">
+            <label>Canal de Compra</label>
+            <select id="moc-canal">
+              <option value="">Selecciona Canal...</option>
+              <option value="Amazon">Amazon</option>
+              <option value="Mercado Libre">Mercado Libre</option>
+              <option value="Tienda Física">Tienda Física</option>
+              <option value="Otro">Otro</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row" id="moc-msi-wrapper" style="display:none;">
+          <div class="form-group" style="flex:1">
+            <label>Forma de Pago</label>
+            <select id="moc-meses-msi">
+              <option value="1">Pago en una sola exhibición</option>
+              <option value="3">3 Meses Sin Intereses (MSI)</option>
+              <option value="6">6 Meses Sin Intereses (MSI)</option>
+              <option value="9">9 Meses Sin Intereses (MSI)</option>
+              <option value="12">12 Meses Sin Intereses (MSI)</option>
+              <option value="15">15 Meses Sin Intereses (MSI)</option>
+              <option value="18">18 Meses Sin Intereses (MSI)</option>
+              <option value="24">24 Meses Sin Intereses (MSI)</option>
+            </select>
+          </div>
+        </div>
+
         <div class="form-group">
           <label>Notas</label>
           <input type="text" id="moc-notas" placeholder="Observaciones generales..." />
         </div>
 
-        <!-- Sugeridos Low Stock -->
-        <div style="margin-top:15px;">
-          <h4 style="margin:0 0 8px; color:#b45309;">⚠️ Sugeridos (Stock Bajo)</h4>
-          <div id="moc-sugeridos-lista">
-            <div style="color:#aaa; font-size:0.85rem;">Cargando sugeridos...</div>
+        <!-- Secciones que se muestran/ocultan según el tipo de compra -->
+        <div id="moc-seccion-productos">
+          <!-- Sugeridos Low Stock -->
+          <div style="margin-top:15px;">
+            <h4 style="margin:0 0 8px; color:#b45309;">⚠️ Sugeridos (Stock Bajo)</h4>
+            <div id="moc-sugeridos-lista">
+              <div style="color:#aaa; font-size:0.85rem;">Cargando sugeridos...</div>
+            </div>
+          </div>
+
+          <!-- Agregar Manualmente Ropa -->
+          <div style="margin-top:18px;">
+            <h4 style="margin:0 0 8px; color:#1d4ed8;">➕ Agregar Producto Manualmente</h4>
+            <div class="form-row">
+              <div class="form-group" style="flex:1">
+                <input type="text" id="moc-buscar" placeholder="Buscar por nombre, color o SKU..." oninput="buscarProductoOC()" onkeydown="if(event.key==='Enter' && window.onScannerEnterOC) { event.preventDefault(); onScannerEnterOC(this.value); }" />
+              </div>
+            </div>
+            <div id="moc-resultados" style="max-height:160px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px; margin-bottom:10px;"></div>
           </div>
         </div>
 
-        <!-- Agregar Manualmente -->
-        <div style="margin-top:18px;">
-          <h4 style="margin:0 0 8px; color:#1d4ed8;">➕ Agregar Producto Manualmente</h4>
+        <div id="moc-seccion-insumos" style="display:none; margin-top:18px;">
+          <h4 style="margin:0 0 8px; color:#1d4ed8;">➕ Agregar Insumo</h4>
           <div class="form-row">
+            <div class="form-group" style="flex:2">
+              <label>Catálogo de Insumos</label>
+              <select id="moc-insumo-select">
+                <option value="">Cargando catálogo...</option>
+              </select>
+            </div>
             <div class="form-group" style="flex:1">
-              <input type="text" id="moc-buscar" placeholder="Buscar por nombre, color o SKU..." oninput="buscarProductoOC()" />
+              <label>Cantidad</label>
+              <input type="number" id="moc-insumo-qty" min="1" value="1" />
+            </div>
+            <div class="form-group" style="flex:1">
+              <label>Precio Unitario</label>
+              <input type="number" id="moc-insumo-precio" min="0" step="0.01" value="0.00" />
+            </div>
+            <div class="form-group" style="align-self:flex-end;">
+              <button class="btn btn-primary" onclick="if(window.agregarInsumoOC) agregarInsumoOC()">Agregar</button>
             </div>
           </div>
-          <div id="moc-resultados" style="max-height:160px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px; margin-bottom:10px;"></div>
+        </div>
+
+        <div id="moc-seccion-equipos" style="display:none; margin-top:18px;">
+          <h4 style="margin:0 0 8px; color:#1d4ed8;">➕ Agregar Equipo / Herramienta</h4>
+          <div class="form-row">
+            <div class="form-group" style="flex:2">
+              <label>Nombre del Equipo</label>
+              <input type="text" id="moc-equipo-nombre" placeholder="Ej: Impresora F170" />
+            </div>
+            <div class="form-group" style="flex:1">
+              <label>Cantidad</label>
+              <input type="number" id="moc-equipo-qty" min="1" value="1" />
+            </div>
+            <div class="form-group" style="flex:1">
+              <label>Costo Total del Equipo</label>
+              <input type="number" id="moc-equipo-precio" min="0" step="0.01" value="0.00" />
+            </div>
+            <div class="form-group" style="align-self:flex-end;">
+              <button class="btn btn-primary" onclick="if(window.agregarEquipoOC) agregarEquipoOC()">Agregar</button>
+            </div>
+          </div>
         </div>
 
         <!-- Items de la orden -->
@@ -508,10 +1309,78 @@
       </div>
     </div>
 
-    <div class="toast" id="toast"></div>
+    <!-- SHORTCUTS FAB (movido al header) -->
+
+    <!-- BÚSQUEDA GLOBAL (Ctrl+K) -->
+    <div class="overlay" id="overlay-global-search" style="z-index:10001;">
+      <div class="global-search-modal">
+        <div style="position:relative;">
+          <span style="position:absolute; left:18px; top:50%; transform:translateY(-50%); font-size:1.1rem; pointer-events:none;">🔍</span>
+          <input type="text" id="gs-input" placeholder="Buscar producto por nombre, SKU o categoría..." autocomplete="off" style="width:100%;">
+        </div>
+        <div class="gs-results" id="gs-results"></div>
+        <div class="gs-footer"><span>↑</span><span>↓</span> Navegar <span>Enter</span> Abrir <span>Esc</span> Cerrar</div>
+      </div>
+    </div>
+
+    <!-- SHORTCUTS PANEL -->
+    <div class="overlay" id="overlay-shortcuts" style="z-index:10001;">
+      <div class="modal shortcuts-modal">
+        <div class="shortcuts-header">
+          <h2>⌨️ Atajos de Teclado</h2>
+          <button class="shortcuts-close-btn" onclick="closeModal('shortcuts')" title="Cerrar">✕ Cerrar</button>
+        </div>
+        <div class="shortcuts-grid">
+          <div class="shortcut-section">
+            <div class="shortcut-section-title">🔍 Búsqueda</div>
+            <div class="shortcut-row"><kbd>Ctrl</kbd> + <kbd>K</kbd><span>Búsqueda global</span></div>
+          </div>
+          <div class="shortcut-section">
+            <div class="shortcut-section-title">➕ Acciones Rápidas</div>
+            <div class="shortcut-row"><kbd>Alt</kbd> + <kbd>N</kbd><span>Nuevo producto</span></div>
+            <div class="shortcut-row"><kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>N</kbd><span>Nueva orden de compra</span></div>
+          </div>
+          <div class="shortcut-section">
+            <div class="shortcut-section-title">📂 Navegación (Alt + número)</div>
+            <div class="shortcut-row"><kbd>Alt</kbd> + <kbd>1</kbd><span>Dashboard</span></div>
+            <div class="shortcut-row"><kbd>Alt</kbd> + <kbd>2</kbd><span>Inventario</span></div>
+            <div class="shortcut-row"><kbd>Alt</kbd> + <kbd>3</kbd><span>Registrar Venta</span></div>
+            <div class="shortcut-row"><kbd>Alt</kbd> + <kbd>4</kbd><span>Conteo Físico</span></div>
+            <div class="shortcut-row"><kbd>Alt</kbd> + <kbd>5</kbd><span>Órdenes de Compra</span></div>
+            <div class="shortcut-row"><kbd>Alt</kbd> + <kbd>6</kbd><span>Historial</span></div>
+            <div class="shortcut-row"><kbd>Alt</kbd> + <kbd>7</kbd><span>Reportes</span></div>
+          </div>
+          <div class="shortcut-section">
+            <div class="shortcut-section-title">🔧 General</div>
+            <div class="shortcut-row"><kbd>Esc</kbd><span>Cerrar modal / panel activo</span></div>
+            <div class="shortcut-row"><kbd>?</kbd><span>Mostrar este panel</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TOAST NOTIFICATION CONTAINER -->
+    <div id="toast-container" style="position:fixed; bottom:20px; right:20px; z-index:9999; display:flex; flex-direction:column; gap:10px;"></div>
+    <div class="toast" id="toast" style="display:none"></div>
+
+    <!-- NOTIFICATIONS PANEL -->
+    <div id="notifications-panel" class="notifications-panel" style="display:none;">
+      <div class="notif-header">
+        <h3>Alertas y Notificaciones</h3>
+        <button onclick="marcarTodasLeidas()" style="font-size:0.75rem; color:var(--primary); background:none; border:none; cursor:pointer;">Marcar todas como leídas</button>
+      </div>
+      <div id="notifications-list" class="notif-list">
+        <div class="notif-empty">No hay notificaciones recientes</div>
+      </div>
+    </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Canvas oculto para generar códigos de barra -->
+    <canvas id="hidden-barcode" style="display:none;"></canvas>
+    <canvas id="barcode-canvas" style="display:none;"></canvas>
 
     <div class="overlay" id="overlay-edit-venta">
       <div class="modal">
@@ -532,6 +1401,182 @@
       </div>
     </div>
 
+    <!-- MODAL USUARIO (Actualizado: mu-id y mu-password-confirm agregados para edición) -->
+    <div class="overlay" id="overlay-usuario">
+      <div class="modal modal-md">
+        <h2 id="mu-title">Usuario</h2>
+        <input type="hidden" id="mu-id">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Nombre Completo</label>
+            <input type="text" id="mu-nombre" placeholder="Juan Pérez">
+          </div>
+          <div class="form-group">
+            <label>Email</label>
+            <input type="email" id="mu-email" placeholder="juan@ejemplo.com">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Nombre de Usuario</label>
+            <input type="text" id="mu-username" placeholder="juan.perez">
+          </div>
+          <div class="form-group">
+            <label>Rol</label>
+            <select id="mu-rol">
+              <option value="vendedor">Vendedor</option>
+              <option value="bodeguero">Bodeguero</option>
+              <option value="admin">Administrador</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Contraseña</label>
+            <input type="password" id="mu-password" placeholder="••••••••">
+            <small id="pwd-help" style="display:none; color:#666;">(Opcional) Deja en blanco para no cambiar</small>
+          </div>
+          <div class="form-group">
+            <label>Confirmar Contraseña</label>
+            <input type="password" id="mu-password-confirm" placeholder="••••••••">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Estado</label>
+          <select id="mu-activo">
+            <option value="1">Activo</option>
+            <option value="0">Inactivo</option>
+          </select>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="closeModal('usuario')">Cancelar</button>
+          <button class="btn btn-primary" onclick="saveUsuario()">Guardar Usuario</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL 2FA SETUP -->
+    <div class="overlay" id="overlay-2fa-setup">
+      <div class="modal modal-md" style="text-align:center;">
+        <h2 style="margin-bottom:10px;">🔐 Configurar 2FA</h2>
+        <p style="font-size:0.9rem; color:#666; margin-bottom:20px;">Escanea este código con Google Authenticator o Authy.</p>
+        
+        <div id="2fa-qr-container" style="background:white; padding:15px; display:inline-block; border-radius:12px; border:1px solid #eee; margin-bottom:20px;">
+          <img id="2fa-qr-img" src="" alt="Código QR 2FA" style="max-width:200px; display:block;">
+        </div>
+        
+        <div style="margin-bottom:20px;">
+           <p style="font-size:0.75rem; color:#888; margin-bottom:5px;">Si no puedes escanear, usa este código:</p>
+           <strong id="2fa-secret-text" style="letter-spacing:2px; font-family:monospace; background:#f1f5f9; padding:5px 10px; border-radius:4px;">-----</strong>
+        </div>
+
+        <div class="form-group" style="max-width:200px; margin:0 auto 20px;">
+          <label for="setup-2fa-code">Ingresa el código generado:</label>
+          <input type="text" id="setup-2fa-code" placeholder="000000" maxlength="6" style="text-align:center; font-size:1.5rem; letter-spacing:5px;">
+        </div>
+
+        <div class="modal-footer" style="justify-content:center;">
+          <button class="btn btn-outline" onclick="closeModal('2fa-setup')">Cancelar</button>
+          <button class="btn btn-primary" onclick="confirm2FASetup()">Activar 2FA</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL HISTORIAL PRECIOS -->
+    <div class="overlay" id="overlay-historial-precio">
+      <div class="modal">
+        <h2 id="hp-title">Historial de Precios</h2>
+        <p id="hp-subtitle" style="font-size:0.85rem; color:#666; margin-bottom:15px;"></p>
+        <div style="max-height:400px; overflow-y:auto; border:1px solid #eee; border-radius:8px;">
+          <table class="table-compact">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Costo Ant.</th>
+                <th>Costo Nuevo</th>
+                <th>Venta Ant.</th>
+                <th>Venta Nueva</th>
+              </tr>
+            </thead>
+            <tbody id="hp-body"></tbody>
+          </table>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-primary" onclick="closeModal('historial-precio')">Cerrar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL DESCUENTO -->
+    <div class="overlay" id="overlay-descuento">
+      <div class="modal modal-sm">
+        <h2 id="md-title">Cupón / Descuento</h2>
+        <input type="hidden" id="md-id">
+        <div class="form-group">
+          <label>Código</label>
+          <input type="text" id="md-codigo" placeholder="Ej: BUENFIN2024">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Tipo</label>
+            <select id="md-tipo">
+              <option value="porcentaje">Porcentaje %</option>
+              <option value="fijo">Monto Fijo $</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Valor</label>
+            <input type="number" id="md-valor" min="0" step="0.01" placeholder="0.00" title="Valor del descuento">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Mín. artículos</label>
+            <input type="number" id="md-min-items" min="1" value="1">
+          </div>
+          <div class="form-group">
+            <label>Estado</label>
+            <select id="md-activo" title="Estado del cupón">
+              <option value="1">Activo</option>
+              <option value="0">Inactivo</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Código de Barras (opcional)</label>
+          <input type="text" id="md-barcode" placeholder="Barcode dedicado para escáner">
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="closeModal('descuento')">Cancelar</button>
+          <button class="btn btn-primary" onclick="saveDescuento()">Guardar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL DE DEVOLUCIÓN PARCIAL -->
+    <div class="overlay" id="overlay-devolucion-parcial">
+      <div class="modal">
+        <h2 id="dp-title">Devolución Parcial de Productos</h2>
+        <p id="dp-subtitle" style="font-size:0.85rem; color:#666; margin-bottom:15px;"></p>
+        <div style="max-height:300px; overflow-y:auto; border:1px solid #eee; border-radius:8px; margin-bottom:20px;">
+          <table class="table-compact" style="width:100%;">
+            <thead>
+              <tr>
+                <th>Producto / Variante</th>
+                <th style="width:100px; text-align:center;">Vendido</th>
+                <th style="width:120px; text-align:center;">Devolver</th>
+              </tr>
+            </thead>
+            <tbody id="dp-body"></tbody>
+          </table>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="closeModal('devolucion-parcial')">Cancelar</button>
+          <button class="btn btn-danger" onclick="confirmarDevolucionParcial()">Procesar Devolución</button>
+        </div>
+      </div>
+    </div>
+
     <div class="overlay" id="overlay-confirm">
       <div class="modal modal-sm" style="text-align:center;">
         <div style="font-size: 3rem; margin-bottom: 10px;">❓</div>
@@ -544,6 +1589,132 @@
       </div>
     </div>
 
-    <script src="app.js"></script>
+    <!-- MODALES CONTABILIDAD -->
+    <div class="overlay" id="overlay-tx-conta">
+      <div class="modal modal-sm">
+        <h2 id="mtx-title">Registrar Ingreso</h2>
+        <input type="hidden" id="mtx-tipo" value="ingreso">
+        <div class="form-group">
+          <label>Monto ($MXN) *</label>
+          <input type="number" id="mtx-monto" min="0" step="0.01" placeholder="0.00">
+        </div>
+        <div class="form-group">
+          <label>Fecha *</label>
+          <input type="date" id="mtx-fecha">
+        </div>
+        <div class="form-group">
+          <label>Concepto / Razón *</label>
+          <input type="text" id="mtx-concepto" placeholder="Ej: Depósito Amazon Quincena">
+        </div>
+        <div class="form-group">
+          <label id="mtx-procedencia-label">Procedencia *</label>
+          <input type="text" id="mtx-procedencia" placeholder="Ej: Amazon, Efectivo...">
+        </div>
+        <div class="form-group">
+          <label>Referencia (opcional)</label>
+          <input type="text" id="mtx-ref" placeholder="ID de transacción o nota">
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="closeModal('tx-conta')">Cancelar</button>
+          <button class="btn btn-primary" onclick="if(window.guardarTransaccionContable) guardarTransaccionContable()">Guardar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL CATÁLOGO INSUMOS -->
+    <div class="overlay" id="overlay-catalogo-insumos">
+      <div class="modal">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+          <h2 style="margin:0;">📦 Catálogo de Insumos</h2>
+          <button class="btn btn-outline" onclick="closeModal('catalogo-insumos')">✕ Cerrar</button>
+        </div>
+        
+        <div class="form-row" style="background:#f8fafc; padding:15px; border-radius:8px; margin-bottom:15px; border:1px solid #e2e8f0;">
+          <div class="form-group" style="flex:2; margin-bottom:0;">
+            <label>Nombre del Insumo</label>
+            <input type="text" id="min-nombre" placeholder="Ej: Vinil Textil Negro">
+          </div>
+          <div class="form-group" style="flex:3; margin-bottom:0;">
+            <label>Descripción</label>
+            <input type="text" id="min-desc" placeholder="Detalles extra...">
+          </div>
+          <div class="form-group" style="align-self:flex-end; margin-bottom:0;">
+            <button class="btn btn-primary" onclick="if(window.guardarInsumo) guardarInsumo()">➕ Agregar</button>
+          </div>
+        </div>
+
+        <div style="max-height:300px; overflow-y:auto;">
+          <table class="table-compact" style="width:100%;">
+            <thead>
+              <tr>
+                <th>Insumo</th>
+                <th>Descripción</th>
+                <th style="width:80px; text-align:center;">Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="min-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <script src="app.js?v=1.1.7"></script>
+    <script src="oc.js?v=1.0.3"></script>
+    <script src="dashboard.js?v=1.0.0"></script>
+    <script src="conteo.js?v=1.0.1"></script>
+    <script src="contabilidad.js?v=1.0.0"></script>
+
+    <!-- Modal Alertas Inteligentes -->
+    <div class="overlay" id="overlay-alertas-inteligentes">
+      <div class="modal" style="max-width: 800px; padding-bottom: 0;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+          <h2 style="margin: 0;">Inteligencia de Reabastecimiento</h2>
+          <button class="btn btn-outline" onclick="closeModal('alertas-inteligentes')">✕ Cerrar</button>
+        </div>
+        
+        <div class="modal-tabs">
+          <button class="modal-tab-btn active" onclick="switchAlertTab('stock_bajo')">⚠️ Stock Bajo</button>
+          <button class="modal-tab-btn" onclick="switchAlertTab('agotados')">❌ Agotados</button>
+        </div>
+
+        <div id="tab-stock_bajo" class="modal-tab-content active">
+          <p style="font-size: 0.85rem; color: var(--on-surface-variant); margin-bottom: 15px;">Productos que están por debajo de su stock mínimo, priorizados por volumen histórico de ventas.</p>
+          <table style="font-size: 0.85rem;">
+            <thead>
+              <tr>
+                <th>Producto</th>
+                <th>Stock</th>
+                <th>Mínimo</th>
+                <th>Ventas Hist.</th>
+                <th>Acción</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-alertas-bajo"></tbody>
+          </table>
+        </div>
+
+        <div id="tab-agotados" class="modal-tab-content">
+          <p style="font-size: 0.85rem; color: var(--on-surface-variant); margin-bottom: 15px;">Productos sin stock, ordenados por los que más vendías.</p>
+          <table style="font-size: 0.85rem;">
+            <thead>
+              <tr>
+                <th>Producto</th>
+                <th>Stock</th>
+                <th>Mínimo</th>
+                <th>Ventas Hist.</th>
+                <th>Acción</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-alertas-agotados"></tbody>
+          </table>
+        </div>
+
+        <div style="position: sticky; bottom: 0; background: var(--surface-container-lowest); padding: 15px 0; border-top: 1px solid var(--surface-container-high); display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
+          <span id="alertas-seleccionadas-count" style="font-weight: 600; color: var(--primary);">0 seleccionados</span>
+          <button class="btn btn-primary" onclick="crearOCConSeleccion()">Crear Orden con Seleccionados</button>
+        </div>
+      </div>
+    </div>
+
   </body>
 </html>

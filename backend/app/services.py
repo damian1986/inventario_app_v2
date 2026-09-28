@@ -1,17 +1,70 @@
+import re
+from decimal import Decimal, ROUND_HALF_UP
+import pyotp
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import delete
 from fastapi import HTTPException
 from app import models, schemas
 from app.sku import generar_sku
-from typing import Optional
-from datetime import datetime, time
+from typing import Optional, List
+from datetime import datetime, time, timedelta
+from dateutil.relativedelta import relativedelta
+from zoneinfo import ZoneInfo
+
+MX_TZ = ZoneInfo("America/Mexico_City")
 
 
-async def _contador_categoria(db: AsyncSession, categoria: str) -> int:
-    result = await db.execute(
-        select(models.Producto).where(models.Producto.categoria == categoria)
-    )
-    return len(result.scalars().all()) + 1
+def _centavos(v) -> Decimal:
+    """Normaliza un monto a 2 decimales con el mismo redondeo que numeric(12,2)."""
+    return Decimal(str(v if v is not None else 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+async def _contador_categoria(db: AsyncSession, categoria: str):
+    q = await db.execute(select(models.Producto).where(models.Producto.categoria == categoria))
+    return len(q.scalars().all())
+
+
+# ── NOTIFICACIONES ───────────────────────────────────────────────────
+
+async def get_notificaciones(db: AsyncSession, skip: int = 0, limit: int = 100):
+    q = select(models.Notificacion).order_by(models.Notificacion.fecha.desc()).offset(skip).limit(limit)
+    result = await db.execute(q)
+    return result.scalars().all()
+
+
+async def crear_notificacion(db: AsyncSession, mensaje: str, tipo: str = "stock_bajo", producto_id: Optional[int] = None):
+    # Evitar duplicados recientes del mismo producto en alerta
+    if producto_id:
+        hace_poco = await db.execute(
+            select(models.Notificacion)
+            .where(models.Notificacion.producto_id == producto_id)
+            .where(models.Notificacion.leida == 0)
+        )
+        if hace_poco.scalar_one_or_none():
+            return None
+            
+    nueva = models.Notificacion(mensaje=mensaje, tipo=tipo, producto_id=producto_id)
+    db.add(nueva)
+    await db.commit()
+    await db.refresh(nueva)
+    return nueva
+
+
+async def marcar_notificacion_leida(db: AsyncSession, id: int):
+    q = await db.execute(select(models.Notificacion).where(models.Notificacion.id == id))
+    n = q.scalar_one_or_none()
+    if n:
+        n.leida = 1
+        await db.commit()
+        await db.refresh(n)
+    return n
+
+
+async def limpiar_notificaciones(db: AsyncSession):
+    await db.execute(delete(models.Notificacion))
+    await db.commit()
+    return {"status": "ok"}
 
 
 async def get_productos(db: AsyncSession, skip: int = 0, limit: int = 1000):
@@ -27,31 +80,41 @@ async def get_all_productos(db: AsyncSession):
 
 
 async def crear_producto(db: AsyncSession, data: schemas.ProductoCreate):
-    datos = data.model_dump()
-
+    nuevo = models.Producto(
+        nombre=data.nombre,
+        sku=data.sku,
+        categoria=data.categoria,
+        qty=data.qty,
+        min_stock=data.min_stock,
+        costo=data.costo,
+        venta=data.venta,
+        notas_internas=data.notas_internas,
+        proveedores_alternativos=data.proveedores_alternativos,
+        variantes=data.variantes
+    )
+    
     # Generar SKU automático si no se proporcionó
-    if not datos.get("sku", "").strip():
-        contador = await _contador_categoria(db, datos["categoria"])
-        datos["sku"] = generar_sku(
-            categoria=datos["categoria"],
-            nombre=datos["nombre"],
-            variantes=datos.get("variantes", []),
-            contador=contador,
+    if not nuevo.sku or not nuevo.sku.strip():
+        contador = await _contador_categoria(db, nuevo.categoria)
+        nuevo.sku = generar_sku(
+            categoria=nuevo.categoria,
+            nombre=nuevo.nombre,
+            variantes=nuevo.variantes,
+            contador=contador + 1,
         )
 
-    p = models.Producto(**datos)
-    db.add(p)
+    db.add(nuevo)
     await db.flush()
-    if p.qty > 0:
+    if nuevo.qty > 0:
         mov = models.Movimiento(
-            tipo="entrada", producto_id=p.id,
-            producto_nombre=p.nombre, qty=p.qty,
+            tipo="entrada", producto_id=nuevo.id,
+            producto_nombre=nuevo.nombre, qty=nuevo.qty,
             canal="Inventario inicial"
         )
         db.add(mov)
     await db.commit()
-    await db.refresh(p)
-    return p
+    await db.refresh(nuevo)
+    return nuevo
 
 
 async def get_producto(db: AsyncSession, id: int):
@@ -63,23 +126,50 @@ async def get_producto(db: AsyncSession, id: int):
 
 async def actualizar_producto(db: AsyncSession, id: int, data: schemas.ProductoUpdate):
     p = await get_producto(db, id)
-    datos = data.model_dump()
+    datos = data.model_dump(exclude_unset=True)
 
     # Regenerar SKU si se dejó vacío al editar
-    if not datos.get("sku", "").strip():
-        contador = await _contador_categoria(db, datos["categoria"])
+    if "sku" in datos and (not datos["sku"] or not datos["sku"].strip()):
+        contador = await _contador_categoria(db, datos.get("categoria", p.categoria))
         datos["sku"] = generar_sku(
-            categoria=datos["categoria"],
-            nombre=datos["nombre"],
-            variantes=datos.get("variantes", []),
+            categoria=datos.get("categoria", p.categoria),
+            nombre=datos.get("nombre", p.nombre),
+            variantes=datos.get("variantes", p.variantes),
             contador=contador,
         )
 
+    # Detectar cambios en costo y venta
+    costo_anterior = p.costo
+    venta_anterior = p.venta
+    hay_cambio_precio = False
+
     for k, v in datos.items():
         setattr(p, k, v)
+        
+    if "costo" in datos and _centavos(datos["costo"]) != _centavos(costo_anterior):
+        hay_cambio_precio = True
+    if "venta" in datos and _centavos(datos["venta"]) != _centavos(venta_anterior):
+        hay_cambio_precio = True
+        
+    if hay_cambio_precio:
+        hp = models.HistorialPrecio(
+            producto_id=p.id,
+            costo_anterior=costo_anterior,
+            costo_nuevo=p.costo,
+            venta_anterior=venta_anterior,
+            venta_nuevo=p.venta
+        )
+        db.add(hp)
+
     await db.commit()
     await db.refresh(p)
     return p
+
+
+async def get_historial_precios(db: AsyncSession, producto_id: int):
+    stmt = select(models.HistorialPrecio).where(models.HistorialPrecio.producto_id == producto_id).order_by(models.HistorialPrecio.fecha.desc())
+    res = await db.execute(stmt)
+    return res.scalars().all()
 
 
 async def eliminar_producto(db: AsyncSession, id: int):
@@ -97,6 +187,11 @@ async def cambiar_qty(db: AsyncSession, id: int, delta: int):
         qty=abs(delta), canal="Ajuste rápido"
     )
     db.add(mov)
+    
+    # Notificación si baja de stock
+    if p.qty <= p.min_stock:
+        await crear_notificacion(db, f"Stock bajo en {p.nombre}: {p.qty} unidades", "stock_bajo", p.id)
+        
     await db.commit()
     await db.refresh(p)
     return p
@@ -113,6 +208,11 @@ async def registrar_venta(db: AsyncSession, data: schemas.VentaRequest):
         canal=data.canal, notas=data.notas
     )
     db.add(mov)
+    
+    # Notificación si baja de stock
+    if p.qty <= p.min_stock:
+        await crear_notificacion(db, f"Stock bajo en {p.nombre}: {p.qty} unidades", "stock_bajo", p.id)
+        
     await db.commit()
     await db.refresh(mov)
     return mov
@@ -195,3 +295,887 @@ async def actualizar_movimiento(db: AsyncSession, id: int, data: schemas.Movimie
     await db.commit()
     await db.refresh(m)
     return m
+
+
+# ── DESCUENTOS ───────────────────────────────────────────────────────
+
+async def get_descuentos(db: AsyncSession, skip: int = 0, limit: int = 100):
+    stmt = select(models.Descuento).order_by(models.Descuento.creado.desc()).offset(skip).limit(limit)
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+
+async def crear_descuento(db: AsyncSession, data: schemas.DescuentoCreate):
+    # Verificar si el código ya existe
+    stmt = select(models.Descuento).where(models.Descuento.codigo == data.codigo)
+    res = await db.execute(stmt)
+    if res.scalar_one_or_none():
+        raise HTTPException(400, "El código de descuento ya existe")
+        
+    nuevo = models.Descuento(**data.model_dump())
+    db.add(nuevo)
+    await db.commit()
+    await db.refresh(nuevo)
+    return nuevo
+
+
+async def actualizar_descuento(db: AsyncSession, id: int, data: schemas.DescuentoUpdate):
+    d = await db.get(models.Descuento, id)
+    if not d:
+        raise HTTPException(404, "Descuento no encontrado")
+    
+    datos = data.model_dump(exclude_unset=True)
+    for k, v in datos.items():
+        setattr(d, k, v)
+        
+    await db.commit()
+    await db.refresh(d)
+    return d
+
+
+async def eliminar_descuento(db: AsyncSession, id: int):
+    d = await db.get(models.Descuento, id)
+    if not d:
+        raise HTTPException(404, "Descuento no encontrado")
+    await db.delete(d)
+    await db.commit()
+    return True
+
+
+async def validar_descuento(db: AsyncSession, codigo: str, total_items: int):
+    # Buscar por código o por barcode
+    stmt = select(models.Descuento).where(
+        (models.Descuento.codigo == codigo) | (models.Descuento.barcode == codigo)
+    )
+    res = await db.execute(stmt)
+    d = res.scalar_one_or_none()
+    
+    if not d:
+        return schemas.DescuentoValidarResponse(
+            id=0, codigo=codigo, tipo="", valor=0, min_items=0,
+            valido=False, mensaje="Código no encontrado"
+        )
+        
+    if not d.activo:
+        return schemas.DescuentoValidarResponse(
+            id=d.id, codigo=d.codigo, tipo=d.tipo, valor=d.valor, min_items=d.min_items,
+            valido=False, mensaje="El cupón está inactivo"
+        )
+        
+    if total_items < d.min_items:
+        return schemas.DescuentoValidarResponse(
+            id=d.id, codigo=d.codigo, tipo=d.tipo, valor=d.valor, min_items=d.min_items,
+            valido=False, mensaje=f"Se requieren al menos {d.min_items} productos"
+        )
+        
+    return schemas.DescuentoValidarResponse(
+        id=d.id, codigo=d.codigo, tipo=d.tipo, valor=d.valor, min_items=d.min_items,
+        valido=True, mensaje="Cupón aplicado correctamente"
+    )
+
+
+# ── AUTENTICACIÓN / USUARIOS ──────────────────────────────────────────────────
+
+def validar_password(password: str):
+    if len(password) < 8 or len(password) > 30:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener entre 8 y 30 caracteres")
+    if not re.search(r"[A-Za-z]", password):
+        raise HTTPException(status_code=400, detail="La contraseña debe contener al menos una letra")
+    if not re.search(r"\d", password):
+        raise HTTPException(status_code=400, detail="La contraseña debe contener al menos un número")
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>\-_]", password):
+        raise HTTPException(status_code=400, detail="La contraseña debe contener al menos un carácter especial")
+
+async def autenticar_usuario(db: AsyncSession, username: str, password: str):
+    """Valida credenciales. Retorna el objeto Usuario o None."""
+    from app.auth import verify_password
+    result = await db.execute(
+        select(models.Usuario).where(models.Usuario.username == username)
+    )
+    user = result.scalar_one_or_none()
+    if user is None or user.activo == 0:
+        return None
+    if not verify_password(password, user.password_hash):
+        return None
+    return user
+
+
+async def crear_usuario(db: AsyncSession, data: schemas.UsuarioCreate) -> models.Usuario:
+    """Crea un nuevo usuario con contraseña hasheada."""
+    from app.auth import hash_password
+
+    # Verificar que el username no exista
+    result = await db.execute(
+        select(models.Usuario).where(models.Usuario.username == data.username)
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="El nombre de usuario ya existe")
+
+    roles_validos = ("admin", "vendedor", "bodeguero")
+    if data.rol not in roles_validos:
+        raise HTTPException(status_code=400, detail=f"Rol inválido. Opciones: {', '.join(roles_validos)}")
+
+    validar_password(data.password)
+
+    user = models.Usuario(
+        username=data.username,
+        nombre=data.nombre,
+        email=data.email,
+        password_hash=hash_password(data.password),
+        rol=data.rol,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def listar_usuarios(db: AsyncSession):
+    """Lista todos los usuarios."""
+    result = await db.execute(select(models.Usuario).order_by(models.Usuario.id))
+    return result.scalars().all()
+
+
+async def actualizar_usuario(db: AsyncSession, id: int, data: schemas.UsuarioUpdate) -> models.Usuario:
+    """Actualiza datos de un usuario (rol, password, activo)."""
+    from app.auth import hash_password
+    user = await db.get(models.Usuario, id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    datos = data.model_dump(exclude_unset=True)
+    if "password" in datos and datos["password"]:
+        validar_password(datos["password"])
+        user.password_hash = hash_password(datos["password"])
+    
+    if "rol" in datos:
+        roles_validos = ("admin", "vendedor", "bodeguero")
+        if datos["rol"] not in roles_validos:
+            raise HTTPException(status_code=400, detail="Rol inválido")
+        user.rol = datos["rol"]
+    
+    if "activo" in datos:
+        user.activo = datos["activo"]
+
+    if "email" in datos:
+        user.email = datos["email"]
+
+    if "nombre" in datos:
+        user.nombre = datos["nombre"] or ""
+
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def preparar_setup_totp(db: AsyncSession, user_id: int):
+    user = await db.get(models.Usuario, user_id)
+    if not user: raise HTTPException(404, "Usuario no encontrado")
+    secret = pyotp.random_base32()
+    user.totp_secret = secret
+    await db.commit()
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=user.username, issuer_name="Inventario Pro")
+    return {"secret": secret, "provisioning_uri": uri}
+
+
+async def activar_totp(db: AsyncSession, user_id: int, code: str):
+    user = await db.get(models.Usuario, user_id)
+    if not user or not user.totp_secret: return False
+    if pyotp.TOTP(user.totp_secret).verify(code, valid_window=2):
+        user.totp_enabled = 1
+        await db.commit()
+        return True
+    return False
+
+
+async def verificar_login_totp(db: AsyncSession, username: str, code: str):
+    q = await db.execute(select(models.Usuario).where(models.Usuario.username == username))
+    user = q.scalar_one_or_none()
+    if not user or not user.totp_enabled or not user.totp_secret: return False
+    return pyotp.TOTP(user.totp_secret).verify(code, valid_window=2)
+
+
+async def desactivar_totp_usuario(db: AsyncSession, user_id: int):
+    user = await db.get(models.Usuario, user_id)
+    if user:
+        user.totp_enabled = 0
+        user.totp_secret = None
+        await db.commit()
+        return True
+    return False
+
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def eliminar_usuario(db: AsyncSession, id: int):
+    """Elimina permanentemente un usuario."""
+    user = await db.get(models.Usuario, id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    await db.delete(user)
+    await db.commit()
+    return True
+
+
+async def seed_admin_if_empty(db: AsyncSession):
+    """Si no hay usuarios en la BD, crea el admin por defecto."""
+    from app.auth import hash_password
+    result = await db.execute(select(models.Usuario).limit(1))
+    if result.scalar_one_or_none() is None:
+        admin = models.Usuario(
+            username="admin",
+            nombre="Administrador Principal",
+            email="admin@inventario.pro",
+            password_hash=hash_password("admin1234"),
+            rol="admin",
+            activo=1,
+        )
+        db.add(admin)
+        await db.commit()
+        print("=" * 55)
+        print("  USUARIO ADMIN CREADO AUTOMÁTICAMENTE")
+        print("  Usuario:    admin")
+        print("  Contraseña: admin1234")
+        print("  ⚠️  CAMBIA ESTA CONTRASEÑA PRONTO")
+        print("=" * 55)
+
+
+# ── LOGS DE AUDITORÍA ────────────────────────────────────────────────
+
+async def registrar_log(
+    db: AsyncSession,
+    usuario_id: Optional[int],
+    username: Optional[str],
+    accion: str,
+    recurso: Optional[str] = None,
+    recurso_id: Optional[str] = None,
+    detalles: Optional[dict] = None
+):
+    """Crea un registro en el log de auditoría."""
+    log = models.AuditLog(
+        usuario_id=usuario_id,
+        username=username,
+        accion=accion,
+        recurso=recurso,
+        recurso_id=recurso_id,
+        detalles=detalles
+    )
+    db.add(log)
+    await db.commit()
+    return log
+
+
+async def get_audit_logs(
+    db: AsyncSession,
+    usuario_id: Optional[int] = None,
+    accion: Optional[str] = None,
+    desde: Optional[str] = None,
+    hasta: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 200
+):
+    """Recupera los logs de auditoría con filtros opcionales."""
+    stmt = select(models.AuditLog).order_by(models.AuditLog.fecha.desc())
+    
+    if usuario_id:
+        stmt = stmt.filter(models.AuditLog.usuario_id == usuario_id)
+    
+    if accion:
+        stmt = stmt.filter(models.AuditLog.accion == accion)
+    
+    if desde:
+        try:
+            desde_dt = datetime.strptime(desde, "%Y-%m-%d")
+            stmt = stmt.filter(models.AuditLog.fecha >= desde_dt)
+        except ValueError:
+            pass
+            
+    if hasta:
+        try:
+            # Fin del día hasta las 23:59:59
+            hasta_dt = datetime.combine(datetime.strptime(hasta, "%Y-%m-%d"), time(23, 59, 59))
+            stmt = stmt.filter(models.AuditLog.fecha <= hasta_dt)
+        except ValueError:
+            pass
+            
+    stmt = stmt.offset(skip).limit(limit)
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+
+async def get_audit_stats(db: AsyncSession):
+    """Retorna conteos estadísticos rápidos del audit log."""
+    from sqlalchemy import func as sqlfunc
+    
+    hoy = datetime.now(MX_TZ).date()
+    hoy_inicio = datetime.combine(hoy, time(0, 0, 0))
+    semana_inicio = hoy_inicio - timedelta(days=7)
+    
+    # Total de logs
+    total_q = await db.execute(select(sqlfunc.count(models.AuditLog.id)))
+    total = total_q.scalar() or 0
+    
+    # Logins de hoy
+    logins_hoy_q = await db.execute(
+        select(sqlfunc.count(models.AuditLog.id))
+        .where(models.AuditLog.accion == "LOGIN")
+        .where(models.AuditLog.fecha >= hoy_inicio)
+    )
+    logins_hoy = logins_hoy_q.scalar() or 0
+    
+    # Acciones de hoy
+    acciones_hoy_q = await db.execute(
+        select(sqlfunc.count(models.AuditLog.id))
+        .where(models.AuditLog.fecha >= hoy_inicio)
+    )
+    acciones_hoy = acciones_hoy_q.scalar() or 0
+    
+    # Cambios de precio esta semana
+    cambios_precio_q = await db.execute(
+        select(sqlfunc.count(models.AuditLog.id))
+        .where(models.AuditLog.accion == "EDITAR_PRODUCTO")
+        .where(models.AuditLog.fecha >= semana_inicio)
+    )
+    cambios_precio_semana = cambios_precio_q.scalar() or 0
+    
+    # Usuarios activos hoy (distintos)
+    usuarios_activos_q = await db.execute(
+        select(sqlfunc.count(sqlfunc.distinct(models.AuditLog.usuario_id)))
+        .where(models.AuditLog.fecha >= hoy_inicio)
+    )
+    usuarios_activos_hoy = usuarios_activos_q.scalar() or 0
+    
+    return schemas.AuditStatsOut(
+        total=total,
+        logins_hoy=logins_hoy,
+        acciones_hoy=acciones_hoy,
+        cambios_precio_semana=cambios_precio_semana,
+        usuarios_activos_hoy=usuarios_activos_hoy,
+    )
+
+
+# ── RESPALDO DE BASE DE DATOS ────────────────────────────────────────
+
+import asyncio
+import os
+import glob
+
+BACKUP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "backups")
+if not os.path.isdir(BACKUP_DIR):
+    # Dentro del contenedor Docker, /app/backups
+    BACKUP_DIR = "/app/backups"
+
+MAX_BACKUPS = 7
+
+
+async def crear_backup_db() -> Optional[str]:
+    """Ejecuta pg_dump y retorna el path del archivo generado."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    
+    db_url = os.getenv("DATABASE_URL", "")
+    # Extraer credenciales de la URL
+    # postgresql+asyncpg://user:pass@host:port/dbname
+    try:
+        parts = db_url.replace("postgresql+asyncpg://", "").replace("postgresql://", "")
+        user_pass, host_db = parts.split("@")
+        user, password = user_pass.split(":")
+        host_port, dbname = host_db.split("/")
+        host = host_port.split(":")[0]
+        port = host_port.split(":")[1] if ":" in host_port else "5432"
+    except Exception:
+        # Fallback a variables de entorno
+        user = os.getenv("POSTGRES_USER", "inventario")
+        password = os.getenv("POSTGRES_PASSWORD", "inventario_secret_pwd_123")
+        host = "db"
+        port = "5432"
+        dbname = os.getenv("POSTGRES_DB", "inventario_db")
+    
+    timestamp = datetime.now(MX_TZ).strftime("%Y%m%d_%H%M%S")
+    filename = f"backup_{timestamp}.sql"
+    filepath = os.path.join(BACKUP_DIR, filename)
+    
+    env = os.environ.copy()
+    env["PGPASSWORD"] = password
+    
+    cmd = [
+        "pg_dump",
+        "-h", host,
+        "-p", port,
+        "-U", user,
+        "-d", dbname,
+        "-f", filepath,
+        "-w", # Force no password prompt
+        "--no-owner",
+        "--no-privileges",
+    ]
+    
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0:
+            error_msg = stderr.decode() if stderr else "Error desconocido en pg_dump"
+            print(f"[BACKUP ERROR] Código {process.returncode}: {error_msg}")
+            # Si el archivo se creó pero está vacío por error, borrarlo
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            return None
+        
+        print(f"[BACKUP OK] Respaldo creado: {filepath}")
+        # Limpiar backups antiguos
+        await limpiar_backups_antiguos()
+        return filepath
+    except FileNotFoundError:
+        print("[BACKUP ERROR] pg_dump no encontrado. Instalar postgresql-client en el contenedor.")
+        return None
+    except Exception as e:
+        print(f"[BACKUP ERROR] {e}")
+        return None
+
+
+async def limpiar_backups_antiguos():
+    """Elimina los backups más antiguos si hay más de MAX_BACKUPS."""
+    try:
+        archivos = sorted(glob.glob(os.path.join(BACKUP_DIR, "backup_*.sql")))
+        while len(archivos) > MAX_BACKUPS:
+            oldest = archivos.pop(0)
+            os.remove(oldest)
+            print(f"[BACKUP CLEANUP] Eliminado backup antiguo: {oldest}")
+    except Exception as e:
+        print(f"[BACKUP CLEANUP ERROR] {e}")
+
+
+def listar_backups() -> list:
+    """Lista todos los archivos de backup disponibles."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    archivos = sorted(glob.glob(os.path.join(BACKUP_DIR, "backup_*.sql")), reverse=True)
+    result = []
+    for path in archivos:
+        stat = os.stat(path)
+        size_mb = stat.st_size / (1024 * 1024)
+        tamano = f"{size_mb:.2f} MB" if size_mb >= 1 else f"{stat.st_size / 1024:.1f} KB"
+        # Extraer fecha del nombre
+        basename = os.path.basename(path)
+        try:
+            date_part = basename.replace("backup_", "").replace(".sql", "")
+            fecha_dt = datetime.strptime(date_part, "%Y%m%d_%H%M%S")
+            fecha_str = fecha_dt.strftime("%d/%m/%Y %H:%M:%S")
+        except Exception:
+            fecha_str = datetime.fromtimestamp(stat.st_mtime).strftime("%d/%m/%Y %H:%M:%S")
+        
+        result.append(schemas.BackupInfoOut(
+            nombre=basename,
+            fecha=fecha_str,
+            tamano=tamano,
+            tamano_bytes=stat.st_size,
+        ))
+    return result
+
+
+async def restaurar_backup_db(nombre_archivo: str) -> bool:
+    """Restaura la base de datos desde un archivo de backup.
+    
+    PROCESO SEGURO:
+    1. Verifica que el archivo existe
+    2. Crea un backup de seguridad previo (pre_restore_*)
+    3. Ejecuta psql para restaurar el dump SQL
+    """
+    filepath = os.path.join(BACKUP_DIR, nombre_archivo)
+    if not os.path.isfile(filepath):
+        print(f"[RESTORE ERROR] Archivo no encontrado: {filepath}")
+        return False
+    
+    # 1. Extraer credenciales de BD
+    db_url = os.getenv("DATABASE_URL", "")
+    try:
+        parts = db_url.replace("postgresql+asyncpg://", "").replace("postgresql://", "")
+        user_pass, host_db = parts.split("@")
+        user, password = user_pass.split(":")
+        host_port, dbname = host_db.split("/")
+        host = host_port.split(":")[0]
+        port = host_port.split(":")[1] if ":" in host_port else "5432"
+    except Exception:
+        user = os.getenv("POSTGRES_USER", "inventario")
+        password = os.getenv("POSTGRES_PASSWORD", "inventario_secret_pwd_123")
+        host = "db"
+        port = "5432"
+        dbname = os.getenv("POSTGRES_DB", "inventario_db")
+    
+    env = os.environ.copy()
+    env["PGPASSWORD"] = password
+    
+    # 2. Crear backup de seguridad antes de restaurar
+    timestamp = datetime.now(MX_TZ).strftime("%Y%m%d_%H%M%S")
+    safety_file = os.path.join(BACKUP_DIR, f"pre_restore_{timestamp}.sql")
+    safety_cmd = [
+        "pg_dump", "-h", host, "-p", port, "-U", user, "-d", dbname,
+        "-f", safety_file, "--no-owner", "--no-privileges",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *safety_cmd, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        if proc.returncode == 0:
+            print(f"[RESTORE] Backup de seguridad creado: {safety_file}")
+        else:
+            print("[RESTORE WARNING] No se pudo crear backup de seguridad, continuando...")
+    except Exception as e:
+        print(f"[RESTORE WARNING] Fallo backup de seguridad: {e}")
+    
+    # 3. Limpiar la base de datos y restaurar
+    # Primero: eliminar todas las tablas (DROP SCHEMA public CASCADE + CREATE SCHEMA)
+    drop_cmd = [
+        "psql", "-h", host, "-p", port, "-U", user, "-d", dbname,
+        "-c", "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO public;",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *drop_cmd, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            error_msg = stderr.decode() if stderr else "Error desconocido"
+            print(f"[RESTORE ERROR] Falló limpiar la BD: {error_msg}")
+            return False
+        print("[RESTORE] Base de datos limpiada correctamente")
+    except Exception as e:
+        print(f"[RESTORE ERROR] {e}")
+        return False
+    
+    # Segundo: restaurar desde el archivo SQL
+    restore_cmd = [
+        "psql", "-h", host, "-p", port, "-U", user, "-d", dbname,
+        "-f", filepath,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *restore_cmd, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            error_msg = stderr.decode() if stderr else "Error desconocido"
+            print(f"[RESTORE ERROR] Falló la restauración: {error_msg}")
+            return False
+        
+        print(f"[RESTORE OK] Base de datos restaurada desde: {nombre_archivo}")
+        return True
+    except Exception as e:
+        print(f"[RESTORE ERROR] {e}")
+        return False
+
+
+# ── GESTIÓN DE VENTAS ────────────────────────────────────────────────
+
+async def get_ventas_agrupadas(
+    db: AsyncSession,
+    desde: Optional[str] = None,
+    hasta: Optional[str] = None,
+    canal: Optional[str] = None,
+    query: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100
+):
+    from sqlalchemy import select
+    import re
+    from datetime import time
+
+    stmt = (
+        select(models.Movimiento, models.Producto.sku)
+        .outerjoin(models.Producto, models.Movimiento.producto_id == models.Producto.id)
+        .where(models.Movimiento.tipo == "venta")
+        .order_by(models.Movimiento.fecha.desc())
+    )
+
+    if canal and canal != "Todos" and canal != "":
+        stmt = stmt.where(models.Movimiento.canal == canal)
+
+    if desde:
+        try:
+            desde_dt = datetime.strptime(desde, "%Y-%m-%d")
+            stmt = stmt.where(models.Movimiento.fecha >= desde_dt)
+        except ValueError:
+            pass
+
+    if hasta:
+        try:
+            hasta_dt = datetime.combine(datetime.strptime(hasta, "%Y-%m-%d"), time(23, 59, 59))
+            stmt = stmt.where(models.Movimiento.fecha <= hasta_dt)
+        except ValueError:
+            pass
+
+    res = await db.execute(stmt)
+    rows = res.all()
+
+    # Group by folio
+    groups = {}
+    
+    for mov, sku in rows:
+        folio = str(mov.id)
+        notas_str = mov.notas or ""
+        if notas_str:
+            parts = notas_str.split(' | ')
+            potential_folio = parts[0].split(' ')[0]
+            if re.match(r'^\d{8}-', potential_folio) or potential_folio.startswith('TICKET-'):
+                folio = potential_folio
+
+        if folio not in groups:
+            groups[folio] = {
+                "folio": folio,
+                "fecha": mov.fecha,
+                "canal": mov.canal or "Venta directa",
+                "total_estimado": Decimal("0"),
+                "total_items": 0,
+                "detalles": []
+            }
+        
+        groups[folio]["detalles"].append({
+            "movimiento_id": mov.id,
+            "producto_id": mov.producto_id,
+            "producto_nombre": mov.producto_nombre,
+            "sku": sku or "",
+            "variante": mov.variante or "",
+            "qty": mov.qty,
+            "precio": mov.precio
+        })
+        groups[folio]["total_estimado"] += mov.precio * mov.qty
+        groups[folio]["total_items"] += mov.qty
+
+    grouped_list = list(groups.values())
+
+    if query:
+        q_clean = query.strip().lower()
+        filtered_list = []
+        for g in grouped_list:
+            match = (
+                q_clean in g["folio"].lower() or 
+                q_clean in g["canal"].lower() or 
+                any(q_clean in d["producto_nombre"].lower() or q_clean in d["sku"].lower() for d in g["detalles"])
+            )
+            if match:
+                filtered_list.append(g)
+        grouped_list = filtered_list
+
+    return grouped_list[skip : skip + limit]
+
+
+async def procesar_devolucion_parcial(
+    db: AsyncSession,
+    folio: str,
+    items: List[schemas.DevolucionParcialItem],
+    usuario_id: Optional[int] = None,
+    username: Optional[str] = None
+):
+    import re
+    for item in items:
+        m = await db.get(models.Movimiento, item.movimiento_id)
+        if not m:
+            raise HTTPException(status_code=404, detail=f"Movimiento con ID {item.movimiento_id} no encontrado")
+        
+        if m.tipo != "venta":
+            raise HTTPException(status_code=400, detail="Solo se pueden realizar devoluciones de movimientos de tipo venta")
+        
+        mov_folio = str(m.id)
+        if m.notas:
+            parts = m.notas.split(' | ')
+            potential_folio = parts[0].split(' ')[0]
+            if re.match(r'^\d{8}-', potential_folio) or potential_folio.startswith('TICKET-'):
+                mov_folio = potential_folio
+        
+        if mov_folio != folio:
+            raise HTTPException(status_code=400, detail=f"El movimiento {m.id} no pertenece al folio {folio}")
+            
+        if item.qty_a_devolver <= 0:
+            raise HTTPException(status_code=400, detail="La cantidad a devolver debe ser mayor a 0")
+            
+        if item.qty_a_devolver > m.qty:
+            raise HTTPException(status_code=400, detail=f"Cantidad a devolver ({item.qty_a_devolver}) excede la cantidad vendida ({m.qty}) para {m.producto_nombre}")
+
+        if m.producto_id:
+            p = await db.get(models.Producto, m.producto_id)
+            if p:
+                p.qty += item.qty_a_devolver
+        
+        orig_qty = m.qty
+        if item.qty_a_devolver == m.qty:
+            await db.delete(m)
+        else:
+            m.qty -= item.qty_a_devolver
+        
+        if usuario_id:
+            await registrar_log(
+                db, usuario_id=usuario_id, username=username,
+                accion="DEVOLUCION_PARCIAL", recurso="Venta", recurso_id=str(item.movimiento_id),
+                detalles={
+                    "folio": folio,
+                    "producto": m.producto_nombre,
+                    "variante": m.variante,
+                    "qty_original": orig_qty,
+                    "qty_devuelto": item.qty_a_devolver,
+                    "precio": float(m.precio)
+                }
+            )
+            
+    await db.commit()
+    return True
+
+
+async def cancelar_venta_completa(
+    db: AsyncSession,
+    folio: str,
+    usuario_id: Optional[int] = None,
+    username: Optional[str] = None
+):
+    import re
+    stmt = select(models.Movimiento).where(models.Movimiento.tipo == "venta")
+    res = await db.execute(stmt)
+    movs = res.scalars().all()
+    
+    target_movs = []
+    for m in movs:
+        mov_folio = str(m.id)
+        if m.notas:
+            parts = m.notas.split(' | ')
+            potential_folio = parts[0].split(' ')[0]
+            if re.match(r'^\d{8}-', potential_folio) or potential_folio.startswith('TICKET-'):
+                mov_folio = potential_folio
+        
+        if mov_folio == folio:
+            target_movs.append(m)
+            
+    if not target_movs:
+        raise HTTPException(status_code=404, detail=f"No se encontraron movimientos para el folio {folio}")
+        
+    for m in target_movs:
+        if m.producto_id:
+            p = await db.get(models.Producto, m.producto_id)
+            if p:
+                p.qty += m.qty
+                
+        if usuario_id:
+            await registrar_log(
+                db, usuario_id=usuario_id, username=username,
+                accion="CANCELAR_VENTA", recurso="Venta", recurso_id=str(m.id),
+                detalles={
+                    "folio": folio,
+                    "producto": m.producto_nombre,
+                    "variante": m.variante,
+                    "qty": m.qty,
+                    "precio": float(m.precio)
+                }
+            )
+        await db.delete(m)
+        
+    await db.commit()
+    return True
+
+
+# ── ALERTAS INTELIGENTES ─────────────────────────────────────────────
+
+async def get_alertas_inteligentes(db: AsyncSession):
+    """
+    Analiza el inventario y retorna los productos agrupados inteligentemente:
+    - stock_bajo_prioritario: Tienen stock bajo y han tenido movimientos (ventas/entradas)
+    - sin_stock_prioritario: Están agotados y han tenido movimientos
+    - sin_movimiento: Nunca han tenido entradas ni ventas
+    """
+    productos_res = await db.execute(select(models.Producto))
+    productos = productos_res.scalars().all()
+    
+    movimientos_res = await db.execute(
+        select(models.Movimiento).where(models.Movimiento.tipo.in_(["venta", "entrada"]))
+    )
+    movimientos = movimientos_res.scalars().all()
+    
+    con_movimiento = set()
+    ventas_por_producto = {}
+    ingresos_por_producto = {}
+    
+    for mov in movimientos:
+        if mov.producto_id:
+            con_movimiento.add(mov.producto_id)
+            if mov.tipo == "venta":
+                ventas_por_producto[mov.producto_id] = ventas_por_producto.get(mov.producto_id, 0) + mov.qty
+                ingresos_por_producto[mov.producto_id] = ingresos_por_producto.get(mov.producto_id, Decimal("0")) + (mov.qty * mov.precio)
+                
+    stock_bajo = []
+    sin_stock = []
+    sin_actividad = []
+    
+    for p in productos:
+        tiene_movimiento = p.id in con_movimiento
+        
+        p_data = {
+            "id": p.id,
+            "nombre": p.nombre,
+            "sku": p.sku or "",
+            "categoria": p.categoria or "Otro",
+            "qty": p.qty,
+            "min_stock": p.min_stock,
+            "costo": p.costo,
+            "venta": p.venta,
+            "ventas_historicas": ventas_por_producto.get(p.id, 0),
+            "total_ingresos": ingresos_por_producto.get(p.id, 0.0)
+        }
+        
+        if not tiene_movimiento:
+            sin_actividad.append(p_data)
+        else:
+            if p.qty <= 0:
+                sin_stock.append(p_data)
+            elif p.qty <= p.min_stock:
+                stock_bajo.append(p_data)
+                
+    # Ordenar por ventas históricas (prioridad)
+    stock_bajo.sort(key=lambda x: x["ventas_historicas"], reverse=True)
+    sin_stock.sort(key=lambda x: x["ventas_historicas"], reverse=True)
+    # Sin actividad ordenar alfabéticamente
+    sin_actividad.sort(key=lambda x: x["nombre"])
+    
+    return {
+        "stock_bajo_prioritario": stock_bajo,
+        "sin_stock_prioritario": sin_stock,
+        "sin_movimiento": sin_actividad
+    }
+
+
+# ── ÓRDENES DE COMPRA / CONTABILIDAD ─────────────────────────────────
+
+def cuotas_msi(total, meses: int) -> List[Decimal]:
+    """Reparte un total en cuotas de 2 decimales cuya suma es exactamente el total.
+
+    La última cuota absorbe la diferencia del redondeo (cuotas iguales + ajuste final),
+    de modo que MSI nunca pierde ni gana centavos (ej. 100.00/3 → 33.33, 33.33, 33.34).
+    """
+    total = _centavos(total)
+    base = _centavos(total / meses)
+    return [base] * (meses - 1) + [total - base * (meses - 1)]
+
+
+async def registrar_egreso_orden(db: AsyncSession, orden, ahora: Optional[datetime] = None):
+    """Agrega a la sesión el/los egresos contables de una OC confirmada (pago único o N cuotas MSI)."""
+    ahora = ahora or datetime.now()
+    if getattr(orden, "pago_msi", 0) == 1 and getattr(orden, "meses_msi", 1) > 1:
+        montos = cuotas_msi(orden.total_estimado, orden.meses_msi)
+    else:
+        montos = [_centavos(orden.total_estimado)]
+
+    for i, monto in enumerate(montos):
+        detalle = f" (Mes {i+1}/{len(montos)})" if len(montos) > 1 else ""
+        db.add(models.ContabilidadTransaccion(
+            tipo="egreso",
+            monto=monto,
+            fecha=ahora + relativedelta(months=i),
+            procedencia_destino=orden.proveedor or "Desconocido",
+            concepto=f"Pago OC {orden.folio}{detalle} - {orden.tipo_compra}",
+            referencia_id=orden.id,
+        ))
