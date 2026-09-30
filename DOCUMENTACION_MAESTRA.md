@@ -926,3 +926,16 @@ Se ha creado un módulo completamente nuevo y ciego para realizar auditorías f�
 ### 27 de Septiembre de 2026 - Plantilla `.env.example`
 - **`.env.example` (nuevo, versionado):** plantilla con los **nombres** de las 5 variables que usa el proyecto (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `DATABASE_URL`, `SECRET_KEY`) y valores de ejemplo, sin ningún secreto real. Incluye instrucciones para copiarlo (`cp .env.example .env`), la nota de que dentro de Docker el host es `db`/fuera es `localhost`, y cómo generar un `SECRET_KEY` nuevo (`python -c "import secrets; print(secrets.token_urlsafe(64))"`).
 - **Motivo:** que cualquier persona (o IA) que clone el repositorio sepa exactamente qué variables configurar, sin depender de la historia de git (que aún contiene el `.env` viejo en commits publicados). El `.env` real sigue en disco e ignorado por `.gitignore`; `.env.example` **no** queda cubierto por esa regla (verificado con `git check-ignore`).
+
+### 30 de Septiembre de 2026 - Búsqueda flexible en "Agregar producto" de Órdenes de Compra (`oc.js`)
+- **Problema reportado:** en el modal de Orden de Compra, buscar «Playera Blanca Dama» no devolvía nada; la búsqueda exigía escribir el nombre exacto del producto (texto literal y contiguo).
+- **Causa raíz (verificada contra la BD real, 619 productos):** `buscarProductoOC` comparaba `nombre + sku + categoria` contra el texto completo con `includes()`:
+  - (a) el orden del catálogo es «Playera Dama Peso D0200 - Blanco Chica» (*Dama* antes de *Blanco*), distinto al orden en que busca la gente;
+  - (b) los colores del catálogo están registrados en masculino («Blanco») y el usuario teclea «Blanca»;
+  - (c) cualquier diferencia de orden, acento, plural o género rompía el match.
+- **`frontend/oc.js` (referencia de caché `v1.0.4` en `frontend/index.html`):**
+  1. Búsqueda por palabras (tokens): normalización a minúsculas y sin acentos (NFD), se descartan conectores (`de`, `la`, `con`…), y se exige que **todas** las palabras aparezcan (en cualquier orden) dentro de `nombre + sku + categoria`.
+  2. Tolerancia morfológica por palabra: plural (`playeras`→`playera`) y género (`blanca`→`blanco`, `negra`→`negro`).
+  3. `onScannerEnterOC`: si lo tecleado/escaneado no es un SKU exacto, ejecuta la búsqueda por texto; solo avisa «SKU no encontrado» y limpia cuando la búsqueda tampoco produce resultados. El escaneo de SKU exacto (código de barras) conserva su flujo intacto.
+- **Verificación (banco Node con el `oc.js` real + export real de la BD):** «Playera Blanca Dama» → 8 resultados (antes 0) · «playera blanca» → 20 (tope de lista) · mayúsculas, orden libre («blanca dama playera»), plural («playeras blancas dama») y códigos de modelo («c0200», «D0200») correctos · texto inexistente → 0 · Enter con texto conserva resultados sin toast · SKU real agrega y limpia · SKU desconocido avisa y limpia. Nota: «sudadera negra grande» da 0 porque hoy **no existen** productos de la categoría Sudadera en el catálogo (0 filas), no es fallo del buscador.
+- **Pendiente opcional (menor):** el resto de buscadores del frontend (`app.js`: inventario, Ctrl+K, etc.) siguen usando `includes()` literal; si se desea, se les puede aplicar el mismo criterio de tokens.

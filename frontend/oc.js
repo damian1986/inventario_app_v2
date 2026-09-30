@@ -116,20 +116,51 @@ window.agregarSugeridoOC = function(id, nombre, publico, genero, color, talla, b
 };
 
 // ── Buscador manual ─────────────────────────────────────────────────
+// Búsqueda flexible: TODAS las palabras del texto deben aparecer (en cualquier
+// orden), sin distinguir mayúsculas ni acentos, tolerando plural y género
+// (blanca→blanco, playeras→playera). Ej.: "Playera Blanca Dama" encuentra
+// "Playera Dama Peso D0200 - Blanco Chica" (antes exigía el nombre literal).
+const OC_STOPWORDS = new Set(['de','del','la','el','los','las','un','una','unos','unas','y','o','con','para','por','en','al']);
+
+function ocNormalizarTexto(s) {
+  return (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function ocVariantesPalabra(palabra) {
+  const vars = new Set([palabra]);
+  // Plural: playeras→playera, colores→color
+  if (palabra.length > 2 && palabra.endsWith('s')) {
+    const sinS = palabra.slice(0, -1);
+    vars.add(sinS);
+    if (sinS.length > 2 && sinS.endsWith('e')) vars.add(sinS.slice(0, -1));
+  }
+  // Género: blanca→blanco, negro→negra
+  for (const v of [...vars]) {
+    if (v.length > 2) {
+      if (v.endsWith('a')) vars.add(v.slice(0, -1) + 'o');
+      else if (v.endsWith('o')) vars.add(v.slice(0, -1) + 'a');
+    }
+  }
+  return [...vars];
+}
+
 window.buscarProductoOC = function() {
-  const texto = (document.getElementById('moc-buscar').value || '').toLowerCase().trim();
+  const texto = ocNormalizarTexto(document.getElementById('moc-buscar').value).trim();
   const cont = document.getElementById('moc-resultados');
   cont.innerHTML = '';
-  if (!texto) return;
+  if (!texto) return 0;
+
+  const palabras = texto.split(/\s+/).filter(w => w.length >= 2 && !OC_STOPWORDS.has(w));
+  if (palabras.length === 0) return 0;
 
   const matches = productos.filter(p => {
-    const cat = (p.categoria || '').toLowerCase();
-    return p.nombre.toLowerCase().includes(texto) || (p.sku||'').toLowerCase().includes(texto) || cat.includes(texto);
+    const haystack = ocNormalizarTexto(`${p.nombre || ''} ${p.sku || ''} ${p.categoria || ''}`);
+    return palabras.every(w => ocVariantesPalabra(w).some(v => haystack.includes(v)));
   }).slice(0, 20);
 
   if (matches.length === 0) {
     cont.innerHTML = '<div style="padding:8px;color:#aaa;font-size:0.85rem;">Sin resultados</div>';
-    return;
+    return 0;
   }
 
   function obtenerCostoDefaultManual(p) {
@@ -154,6 +185,7 @@ window.buscarProductoOC = function() {
       `;
     cont.appendChild(div);
   });
+  return matches.length;
 };
 
 window.seleccionarProductoOC = function(id, nombre, publico, genero, color, talla, costo = 0) {
@@ -185,8 +217,15 @@ window.onScannerEnterOC = function(val) {
     document.getElementById('moc-buscar').value = '';
     document.getElementById('moc-resultados').innerHTML = '';
   } else {
-    toast(`❌ SKU no encontrado en catálogo: ${val}`, false);
-    document.getElementById('moc-buscar').value = '';
+    // No es un SKU exacto del catálogo: tratarlo como búsqueda por texto.
+    // Así, escribir "Playera Blanca Dama" + Enter muestra resultados en vez
+    // de reportar "SKU no encontrado". Un escaneo inválido (texto que no
+    // coincide con nada) sigue avisando y limpiando el campo.
+    if (buscarProductoOC() === 0) {
+      toast(`❌ SKU no encontrado en catálogo: ${val}`, false);
+      document.getElementById('moc-buscar').value = '';
+      document.getElementById('moc-resultados').innerHTML = '';
+    }
   }
 };
 
