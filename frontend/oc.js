@@ -86,11 +86,11 @@ async function cargarSugeridosOC() {
       const div = document.createElement('div');
       div.style.cssText = 'display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:0.85rem;';
       div.innerHTML = `
-        <span style="flex:3;color:#374151;">${p.nombre}</span>
+        <span style="flex:3;color:#374151;">${escapeHtml(p.nombre)}</span>
         <span style="flex:1.5;color:#6b7280;font-size:0.75rem; white-space:nowrap;">Stock: ${p.qty} | Costo: ${mxn(costoReal)}</span>
         <input type="number" min="1" value="1" style="width:55px;" class="oc-sug-qty" />
         <input type="number" min="0" step="0.01" value="${costoReal}" placeholder="$Precio" style="width:75px;" class="oc-sug-precio" />
-        <button class="btn btn-sm btn-primary" onclick="agregarSugeridoOC(${p.id}, '${esc(p.nombre)}', '${esc(publico)}', '${esc(genero)}', '${esc(color)}', '${esc(talla)}', this)" style="white-space:nowrap;">+ Agregar</button>
+        <button class="btn btn-sm btn-primary" onclick="agregarSugeridoOC(${p.id}, '${escapeJsAttr(p.nombre)}', '${escapeJsAttr(publico)}', '${escapeJsAttr(genero)}', '${escapeJsAttr(color)}', '${escapeJsAttr(talla)}', this)" style="white-space:nowrap;">+ Agregar</button>
       `;
       cont.appendChild(div);
     });
@@ -102,11 +102,12 @@ async function cargarSugeridosOC() {
       cont.appendChild(hint);
     }
   } catch(e) {
-    cont.innerHTML = `<div style="color:red;font-size:0.85rem;">Error cargando sugeridos: ${e.message}</div>`;
+    cont.innerHTML = `<div style="color:red;font-size:0.85rem;">Error cargando sugeridos: ${escapeHtml(e.message)}</div>`;
   }
 }
 
-function esc(str) { return (str||'').replace(/'/g, "\\'"); }
+// Los argumentos de cadena para atributos onclick se escapan con escapeJsAttr()
+// y el texto visible con escapeHtml(); ambas viven en app.js (se cargan antes).
 
 window.agregarSugeridoOC = function(id, nombre, publico, genero, color, talla, btn) {
   const row = btn.closest('div');
@@ -120,42 +121,21 @@ window.agregarSugeridoOC = function(id, nombre, publico, genero, color, talla, b
 // orden), sin distinguir mayúsculas ni acentos, tolerando plural y género
 // (blanca→blanco, playeras→playera). Ej.: "Playera Blanca Dama" encuentra
 // "Playera Dama Peso D0200 - Blanco Chica" (antes exigía el nombre literal).
-const OC_STOPWORDS = new Set(['de','del','la','el','los','las','un','una','unos','unas','y','o','con','para','por','en','al']);
-
-function ocNormalizarTexto(s) {
-  return (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-}
-
-function ocVariantesPalabra(palabra) {
-  const vars = new Set([palabra]);
-  // Plural: playeras→playera, colores→color
-  if (palabra.length > 2 && palabra.endsWith('s')) {
-    const sinS = palabra.slice(0, -1);
-    vars.add(sinS);
-    if (sinS.length > 2 && sinS.endsWith('e')) vars.add(sinS.slice(0, -1));
-  }
-  // Género: blanca→blanco, negro→negra
-  for (const v of [...vars]) {
-    if (v.length > 2) {
-      if (v.endsWith('a')) vars.add(v.slice(0, -1) + 'o');
-      else if (v.endsWith('o')) vars.add(v.slice(0, -1) + 'a');
-    }
-  }
-  return [...vars];
-}
+// La lógica vive en app.js y la comparten todos los buscadores del frontend:
+// normalizarBusqueda() / variantesBusqueda() / BUSQUEDA_STOPWORDS.
 
 window.buscarProductoOC = function() {
-  const texto = ocNormalizarTexto(document.getElementById('moc-buscar').value).trim();
+  const texto = normalizarBusqueda(document.getElementById('moc-buscar').value).trim();
   const cont = document.getElementById('moc-resultados');
   cont.innerHTML = '';
   if (!texto) return 0;
 
-  const palabras = texto.split(/\s+/).filter(w => w.length >= 2 && !OC_STOPWORDS.has(w));
+  const palabras = texto.split(/\s+/).filter(w => w.length >= 2 && !BUSQUEDA_STOPWORDS.has(w));
   if (palabras.length === 0) return 0;
 
   const matches = productos.filter(p => {
-    const haystack = ocNormalizarTexto(`${p.nombre || ''} ${p.sku || ''} ${p.categoria || ''}`);
-    return palabras.every(w => ocVariantesPalabra(w).some(v => haystack.includes(v)));
+    const haystack = normalizarBusqueda(`${p.nombre || ''} ${p.sku || ''} ${p.categoria || ''}`);
+    return palabras.every(w => variantesBusqueda(w).some(v => haystack.includes(v)));
   }).slice(0, 20);
 
   if (matches.length === 0) {
@@ -180,8 +160,8 @@ window.buscarProductoOC = function() {
       const div = document.createElement('div');
       div.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #f1f5f9;font-size:0.85rem;display:flex;justify-content:space-between;align-items:center;';
       div.innerHTML = `
-        <span>${p.nombre} <small style="color:#94a3b8;">(Stock: ${p.qty}, Costo: ${mxn(costoReal)})</small></span>
-        <button class="btn btn-sm btn-primary" onclick="seleccionarProductoOC(${p.id},'${esc(p.nombre)}','${esc(publico)}','${esc(genero)}','${esc(color)}','${esc(talla)}', ${costoReal})">Agregar</button>
+        <span>${escapeHtml(p.nombre)} <small style="color:#94a3b8;">(Stock: ${p.qty}, Costo: ${mxn(costoReal)})</small></span>
+        <button class="btn btn-sm btn-primary" onclick="seleccionarProductoOC(${p.id},'${escapeJsAttr(p.nombre)}','${escapeJsAttr(publico)}','${escapeJsAttr(genero)}','${escapeJsAttr(color)}','${escapeJsAttr(talla)}', ${costoReal})">Agregar</button>
       `;
     cont.appendChild(div);
   });
@@ -301,7 +281,7 @@ function renderItemsOC() {
     div.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 4px;border-bottom:1px solid #f1f5f9;font-size:0.82rem;';
     const isObligatoria = item.es_obligatoria ? 'checked' : '';
     div.innerHTML = `
-      <span style="flex:3;">${item.producto_nombre}</span>
+      <span style="flex:3;">${escapeHtml(item.producto_nombre)}</span>
       <input type="number" min="1" value="${item.qty}" style="width:55px;" onchange="ocUpdateItem(${idx},'qty',this.value)" title="Cantidad" />
       <input type="number" min="0" step="0.01" value="${item.precio_proveedor}" style="width:75px;" onchange="ocUpdateItem(${idx},'precio',this.value)" title="Precio proveedor" placeholder="$" />
       <span style="width:70px;text-align:right;color:#16a34a;font-weight:600;">${mxn(subtotal)}</span>
@@ -409,7 +389,7 @@ window.cargarInsumosOCSelect = async function() {
     } else {
       select.innerHTML = '<option value="">-- Selecciona --</option>';
       res.forEach(i => {
-        select.innerHTML += `<option value="${i.id}">${i.nombre}</option>`;
+        select.innerHTML += `<option value="${i.id}">${escapeHtml(i.nombre)}</option>`;
       });
     }
   } catch(e) {
@@ -527,8 +507,8 @@ window.renderOrdenesCompra = async function() {
     ordenes.forEach(orden => {
       const div = document.createElement('div');
       div.style.cssText = 'border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px;margin-bottom:10px;background:#fff;';
-      const badge = `<span style="background:${estadoColor[orden.estado]||'#94a3b8'};color:white;padding:2px 8px;border-radius:12px;font-size:0.75rem;">${estadoLabel[orden.estado]||orden.estado}</span>`;
-      const badgeTipo = `<span style="background:#e2e8f0;color:#475569;padding:2px 8px;border-radius:12px;font-size:0.70rem;margin-left:5px;">${(orden.tipo_compra || 'ropa').toUpperCase()}</span>`;
+      const badge = `<span style="background:${estadoColor[orden.estado]||'#94a3b8'};color:white;padding:2px 8px;border-radius:12px;font-size:0.75rem;">${escapeHtml(estadoLabel[orden.estado]||orden.estado)}</span>`;
+      const badgeTipo = `<span style="background:#e2e8f0;color:#475569;padding:2px 8px;border-radius:12px;font-size:0.70rem;margin-left:5px;">${escapeHtml((orden.tipo_compra || 'ropa').toUpperCase())}</span>`;
       const msiBadge = orden.pago_msi ? `<span style="color:#b45309;font-weight:bold;font-size:0.75rem;margin-left:5px;">(${orden.meses_msi} MSI)</span>` : '';
       const fecha = orden.creado ? new Date(orden.creado).toLocaleDateString('es-MX') : '—';
       const totalPzas = (orden.items||[]).reduce((s,i)=>s+(i.qty||0),0);
@@ -547,14 +527,14 @@ window.renderOrdenesCompra = async function() {
       div.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
           <div>
-            <strong>${orden.folio}</strong> ${badge} ${badgeTipo} ${msiBadge}
+            <strong>${escapeHtml(orden.folio)}</strong> ${badge} ${badgeTipo} ${msiBadge}
             <div style="color:#6b7280;font-size:0.82rem;margin-top:3px;">
-              Proveedor: ${orden.proveedor||'—'} &nbsp;·&nbsp;
+              Proveedor: ${escapeHtml(orden.proveedor||'—')} &nbsp;·&nbsp;
               ${totalPzas} items &nbsp;·&nbsp;
               Est. ${mxn(orden.total_estimado)} &nbsp;·&nbsp;
               ${fecha}
             </div>
-            ${orden.notas ? `<div style="color:#94a3b8;font-size:0.78rem;">${orden.notas}</div>` : ''}
+            ${orden.notas ? `<div style="color:#94a3b8;font-size:0.78rem;">${escapeHtml(orden.notas)}</div>` : ''}
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
             ${btnEditar}${btnEnviar}${btnConfirmar}${btnPDF}${btnDuplicar}${btnCancelar}

@@ -126,6 +126,26 @@ class Usuario(Base):
     creado        = Column(DateTime(timezone=True), server_default=func.now())
 
 
+# ── PASSKEYS (WEBAUTHN) ───────────────────────────────────────────────
+
+class WebAuthnCredential(Base):
+    """Credencial de passkey (WebAuthn) ligada a un usuario.
+
+    La llave privada NUNCA sale del dispositivo del usuario (Windows Hello,
+    huella, PIN o llave USB). Aquí solo se guarda la llave PÚBLICA.
+    """
+    __tablename__ = "webauthn_credentials"
+    id            = Column(Integer, primary_key=True, index=True)
+    usuario_id    = Column(Integer, ForeignKey("usuarios.id", ondelete="CASCADE"), nullable=False, index=True)
+    credential_id = Column(String(255), unique=True, nullable=False, index=True)  # base64url (sin padding)
+    public_key    = Column(Text, nullable=False)      # COSE key en base64url
+    sign_count    = Column(Integer, default=0)        # contador anti-clonación
+    transports    = Column(String(100), default="")   # internal,usb,nfc,ble,hybrid
+    nombre        = Column(String(100), default="")   # p. ej. "Este dispositivo"
+    creado        = Column(DateTime(timezone=True), server_default=func.now())
+    ultimo_uso    = Column(DateTime(timezone=True), nullable=True)
+
+
 # ── LOGS DE AUDITORÍA ────────────────────────────────────────────────
 
 class AuditLog(Base):

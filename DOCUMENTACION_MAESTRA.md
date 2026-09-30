@@ -214,11 +214,41 @@ La base relacional (declarativa) posee 4 tablas troncales hiper-relacionadas:
 
 El proyecto ha sido auditado y fortalecido para despliegue en VPS (Hetzner/DigitalOcean):
 
-1. **Aislamiento Docker:** El proceso principal corre bajo un usuario sin privilegios (`appuser`) y la base de datos se consume por la red interna de Docker (`db:5432`). ⚠️ **Pendiente para VPS (verificado 2026-09-27):** `docker-compose.yml` todavía mapea `5432:5432` al host (se conserva para herramientas de BD locales y ejecución del backend fuera de Docker); eliminarlo es acción obligatoria antes de exponer el VPS.
-2. **Rate Limiting:** Los endpoints `/auth/login` y `/auth/2fa/verify` están protegidos contra ataques de fuerza bruta mediante `slowapi` (**10 intentos/minuto y 100/hora por IP**). El limitador es *proxy-aware* (solo confía en `X-Forwarded-For` si el par inmediato es una IP de red interna) y puede desactivarse sin tocar código con la variable de entorno `RATE_LIMIT_DISABLED=1`.
+1. **Aislamiento Docker:** El proceso principal corre bajo un usuario sin privilegios (`appuser`) y la base de datos se consume por la red interna de Docker (`db:5432`). ⚠️ **Pendiente para VPS (verificado 2026-09-27 y confirmado 2026-09-30):** `docker-compose.yml` todavía mapea `5432:5432` al host — se conserva a propósito para herramientas de BD locales, y **advertencia explícita en el propio compose** (decisión del usuario 2026-09-30); eliminarlo es acción obligatoria antes de exponer el VPS (ver guía abajo).
+2. **Rate Limiting:** Los endpoints `/auth/login`, `/auth/2fa/verify` y los dos pasos WebAuthn de login (`/auth/webauthn/login/options` y `/auth/webauthn/login/verify`) están protegidos contra ataques de fuerza bruta mediante `slowapi` (**10 intentos/minuto y 100/hora por IP**). El limitador es *proxy-aware* (solo confía en `X-Forwarded-For` si el par inmediato es una IP de red interna) y puede desactivarse sin tocar código con la variable de entorno `RATE_LIMIT_DISABLED=1`.
 3. **Seguridad HTTP:** Inyección automática de cabeceras `HSTS`, `X-Frame-Options` (contra clickjacking), y `X-Content-Type-Options`.
 4. **Política de Contraseñas:** Validación de complejidad mínima (8+ caracteres, símbolos, mayúsculas) forzada tanto en Frontend como en Backend.
-5. **Autenticación en toda la API:** todas las rutas exigen JWT (`Bearer`) con rol verificado (`require_role`), salvo las públicas por diseño: `/health`, `/auth/login` y `/auth/2fa/verify`. Corregido el 2026-09-27 (hallazgo #10: `/productos`, `/notificaciones` y `/sku/preview` respondían sin token).
+5. **Autenticación en toda la API:** todas las rutas exigen JWT (`Bearer`) con rol verificado (`require_role`), salvo las públicas por diseño: `/health`, `/auth/login`, `/auth/2fa/verify` y los pasos WebAuthn del segundo factor (`/auth/webauthn/login/options` y `/auth/webauthn/login/verify`, que exigen un `temp_token` de 5 min con claim `2fa_pending`). Corregido el 2026-09-27 (hallazgo #10: `/productos`, `/notificaciones` y `/sku/preview` respondían sin token).
+6. **Secretos rotados (2026-09-30):** la contraseña de PostgreSQL y la `SECRET_KEY` que estuvieron en el historial de GitHub fueron reemplazadas por valores nuevos (solo viven en `.env`, ignorado por git). Ver bitácora «Rotación de credenciales ejecutada».
+
+### Guía de endurecimiento para VPS (documentada el 2026-09-30 — ejecución pendiente)
+
+Pasos en orden para publicar en un VPS limpio (Ubuntu/Debian). Decisión del usuario 2026-09-30: **solo documentar** (no se ejecutó nada de esto en la máquina local).
+
+1. **Endurecer el acceso SSH (antes que nada):** crear usuario no root con `sudo`; subir su llave pública (`ssh-copy-id`); en `/etc/ssh/sshd_config` fijar `PermitRootLogin no` y `PasswordAuthentication no`; reiniciar `sshd`.
+2. **Firewall (UFW):** permitir solo `22/tcp`, `80/tcp` y `443/tcp`; `ufw enable`. El API (`8000`) y la BD (`5432`) **no** se abren al exterior.
+3. **Docker:** instalar Docker Engine + plugin `compose` desde el repositorio oficial; agregar el usuario al grupo `docker`.
+4. **Código y secretos en el servidor:** `git clone` del repositorio; `cp .env.example .env` y generar valores **nuevos** (nunca reutilizar los locales): contraseña de BD y `SECRET_KEY` (`python -c "import secrets; print(secrets.token_urlsafe(64))"`). `.env` no se versiona (ya está en `.gitignore`).
+5. **`docker-compose.yml` en el servidor:** eliminar el mapeo `5432:5432` (ya marcado con advertencia en el archivo); opcional: quitar también `8000:8000` si el proxy inverso enruta por la red interna de Docker.
+6. **Primer arranque:** `docker compose up -d --build` (el build es estricto en TLS; no usar `PIP_EXTRA`, que es solo para la máquina local con antivirus). Con BD vacía, definir `ADMIN_INITIAL_PASSWORD` antes del primer arranque (o tomar la contraseña aleatoria única del log) y cambiarla al primer inicio de sesión. Con BD existente, `alembic current` debe responder `a3f8c2d91b47 (head)` (revisión vigente desde 2026-09-30: passkeys).
+7. **Traefik + SSL:** proxy inverso con certificados Let's Encrypt para el frontend (y opcionalmente la API); el tráfico directo a puertos internos queda cerrado por UFW.
+8. **Respaldos:** el scheduler del backend ya corre solo (cada 24 h, 7 copias, carpeta `backups/` montada al host); se recomienda copiarlas periódicamente fuera del VPS.
+9. **Verificación post-despliegue:** `/health` → 200; login normal; catálogo carga; y desde fuera, `curl` sin token a `/productos` → 401.
+
+#### Variante rápida: migrar todo desde un snapshot (documentada y verificada el 2026-09-30)
+
+Si se quiere llevar **el proyecto completo con datos** en un solo archivo, `snapshot.py` (raíz) genera `versiones_seguras/Inventario_Snapshot_<fecha>.zip` con: todo el código, `.env` local, `backups/` y `base_de_datos_snapshot.sql` (dump `pg_dump --no-owner --no-privileges`). ⚠️ El ZIP **incluye los secretos locales** (rotarlos en el VPS) y `backend/.venv` (venv de Windows, inútil en Linux: borrarlo). Snapshot de referencia: `Inventario_Snapshot_20260930_152728.zip` (1.762 archivos; incluye passkeys y sello `a3f8c2d91b47`).
+
+Secuencia verificada (sustituye a los pasos 4–6 anteriores):
+
+1. Copiar el ZIP al VPS (`scp`), descomprimir en la carpeta del proyecto y `rm -rf backend/.venv`.
+2. **Editar ANTES del primer arranque** (el `.env` del ZIP trae los valores locales): (a) `docker-compose.yml`: eliminar `5432:5432`; (b) `.env`: contraseña de BD nueva (actualizarla también dentro de `DATABASE_URL`), `SECRET_KEY` nueva y **agregar** las claves `WEBAUTHN_RP_ID=<dominio sin esquema>`, `WEBAUTHN_RP_NAME=Inventario Pro`, `WEBAUTHN_ORIGIN=https://<dominio>` (el `.env` local no las trae y sin ellas quedarían en `localhost`); (c) `frontend/app.js` línea 1: apuntar `const API` a la URL real del API (por defecto usa `hostname:8000`, puerto que en el VPS no queda expuesto).
+3. **Restaurar la BD en orden seguro** — NO usar `python snapshot.py restore`: ese script arranca la app antes de restaurar el SQL y el seed podría chocar con los datos del dump. Orden correcto:
+   - `docker compose up -d db` y esperar a que `pg_isready` responda dentro del contenedor;
+   - `docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < base_de_datos_snapshot.sql`;
+   - verificar conteos con un `SELECT count(*)` de control; y
+   - `docker compose up -d --build` (build estricto en TLS, sin `PIP_EXTRA`).
+4. **Post-arranque:** `alembic current` → `a3f8c2d91b47`; resetear la contraseña del admin con `ADMIN_RESET_PASSWORD` (el script también borra sus passkeys); las passkeys registradas en `localhost` **no funcionan** bajo el dominio nuevo (cambió el RP ID): volver a registrarlas desde el botón 🔑. Continuar con los pasos 1–3, 7–9 de esta guía (SSH, UFW, Traefik+SSL, respaldos, verificación).
 
 ---
 
@@ -385,7 +415,7 @@ Cualquier agente que modifique este proyecto DEBE alinear sus procesos al siguie
 - **Progreso:** 60% Completado.
 - Pydantic activo con validación de schemas.
 - Cabeceras de seguridad HTTP implementadas: `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`.
-- `slowapi` (Rate Limiter) **reactivado el 2026-09-27** con límites seguros (`10/minute;100/hour` por IP) en `/auth/login` y `/auth/2fa/verify`. Se eliminó el límite agresivo de 5/hora causante de la incidencia 2026-03-30. No hay límites globales ni middleware (el polling de `/notificaciones` no se ve afectado). Interruptor de emergencia: env `RATE_LIMIT_DISABLED=1`.
+- `slowapi` (Rate Limiter) **reactivado el 2026-09-27** con límites seguros (`10/minute;100/hour` por IP) en `/auth/login`, `/auth/2fa/verify` y los endpoints WebAuthn de login (2026-09-30). Se eliminó el límite agresivo de 5/hora causante de la incidencia 2026-03-30. No hay límites globales ni middleware (el polling de `/notificaciones` no se ve afectado). Interruptor de emergencia: env `RATE_LIMIT_DISABLED=1`.
 - Pendiente: `max_length` y rangos numéricos explícitos en schemas Pydantic, `Content-Security-Policy`.
 
 ### 20. Verificación de Integridad y Prevención de Corrupción de BD
@@ -395,15 +425,22 @@ Cualquier agente que modifique este proyecto DEBE alinear sus procesos al siguie
 - **"Dry-run backups":** Mecanismo para probar silenciosamente que un respaldo funciona (descomprimiéndolo en un esquema o base de pruebas) antes de marcarlo como "Válido" para uso del sistema.
 - Alertas de umbrales críticos de tamaño y bloqueos prolongados (deadlocks) en consultas concurrentes.
 
-### 21. Autenticación de Dos Factores (2FA / TOTP)
+### 21. Autenticación de Dos Factores (2FA: TOTP + Passkeys)
 - **Progreso:** 100% Completado.
 - Implementación completa de TOTP usando `pyotp` con compatibilidad con Google Authenticator y Authy.
 - Flujo de setup: Botón 🔐 en la barra superior → genera QR + secreto → usuario escanea y confirma con primer código.
 - Flujo de login: Credenciales → Token temporal de 5 min → Pantalla de verificación 2FA → JWT final.
 - Ventana de tolerancia de ±2 intervalos (`valid_window=2`) para compensar desfase de reloj.
-- Endpoints: `/auth/2fa/setup`, `/auth/2fa/enable`, `/auth/2fa/verify`.
+- Endpoints TOTP: `/auth/2fa/setup`, `/auth/2fa/enable`, `/auth/2fa/verify`.
 - Panel de Admin permite desactivar 2FA de cualquier usuario.
-- Script de emergencia `reset_admin_2fa.py` para resetear 2FA + contraseña del admin desde el contenedor Docker.
+- Script de emergencia `reset_admin_2fa.py` para resetear 2FA + contraseña del admin desde el contenedor Docker (desde 2026-09-30 también elimina las passkeys del usuario).
+- **Passkeys (WebAuthn/FIDO2, implementadas el 2026-09-30):** segundo factor que **convive** con el TOTP (no lo sustituye); el usuario elige en pantalla según los métodos que tenga configurados.
+  - La llave privada **nunca sale del dispositivo** (Windows Hello, Touch ID, llave USB); el servidor guarda solo la llave pública en `webauthn_credentials` (migración Alembic `a3f8c2d91b47`).
+  - Endpoints de gestión (autenticados): `POST /auth/webauthn/register/options`, `POST /auth/webauthn/register/verify`, `GET /auth/webauthn/credenciales`, `DELETE /auth/webauthn/credenciales/{id}`.
+  - Endpoints de login (públicos, exigen `temp_token` con claim `2fa_pending`; rate limit `10/min;100/h`): `POST /auth/webauthn/login/options`, `POST /auth/webauthn/login/verify` (emite el JWT final).
+  - Seguridad: `user_verification=required` (huella/PIN obligatorios en el dispositivo), retos en memoria con TTL de 5 min y verificación de `sign_count` contra clonación.
+  - Gestión desde la UI: botón 🔑 «Passkey» en la barra lateral (visible solo si el navegador puede usarlas) → registrar este dispositivo / listar / eliminar.
+  - **Requiere contexto seguro:** funciona en `localhost` o HTTPS; **no** en IP plana por LAN. Para el VPS definir `WEBAUTHN_RP_ID`, `WEBAUTHN_RP_NAME` y `WEBAUTHN_ORIGIN` en `.env` (ver `.env.example`).
 - **Incidencia 2026-03-30:** El Rate Limiter bloqueó el login tras múltiples pruebas de 2FA. Se deshabilitó temporalmente y se ejecutó reset de emergencia. **Resuelto el 2026-09-27:** reactivado con límites seguros (10/min;100/h) y kill-switch por env.
 
 ## 📝 Historial de Revisiones / Bitácora
@@ -489,8 +526,8 @@ Este documento detalla los hallazgos de seguridad encontrados en el análisis de
 - **⚠️ Puerto 5432 Expuesto (único pendiente de infraestructura)**: `docker-compose.yml` conserva `- "5432:5432"` para conexiones locales (herramientas de BD y backend fuera de Docker). **Acción obligatoria antes de desplegar en VPS:** eliminar ese mapeo (una línea); el backend se conecta por la red interna de Docker y no lo necesita. En un host público es vulnerabilidad crítica si la contraseña es débil o hay exploits de PostgreSQL.
 
 ### 🟢 Aplicación (Backend) — Mitigaciones Aplicadas
-- **~~Endpoints sin autenticación~~**: ✅ Corregido el 2026-09-27 (hallazgo #10 de la auditoría): `GET /productos`, `/notificaciones` (GET/PUT/DELETE) y `GET /sku/preview` ahora exigen JWT con rol verificado (`require_role`). Públicos por diseño: `/health`, `/auth/login` y `/auth/2fa/verify`.
-- **~~Falta de Rate Limiting~~**: ✅ Implementado con `slowapi`. **Reactivado el 2026-09-27** tras la pausa por la incidencia 2026-03-30, ahora con límites seguros `10/minute;100/hour` por IP en `/auth/login` y `/auth/2fa/verify`. Key-func *proxy-aware* (valida `X-Forwarded-For` solo si el peer es IP privada) y kill-switch `RATE_LIMIT_DISABLED=1`. El 429 devuelve `{"error": "<mensaje en español>"}` y el frontend lo muestra en el recuadro de error del login.
+- **~~Endpoints sin autenticación~~**: ✅ Corregido el 2026-09-27 (hallazgo #10 de la auditoría): `GET /productos`, `/notificaciones` (GET/PUT/DELETE) y `GET /sku/preview` ahora exigen JWT con rol verificado (`require_role`). Públicos por diseño: `/health`, `/auth/login`, `/auth/2fa/verify` y los pasos WebAuthn del segundo factor (`/auth/webauthn/login/options` y `/auth/webauthn/login/verify`, protegidos por `temp_token` de 5 min).
+- **~~Falta de Rate Limiting~~**: ✅ Implementado con `slowapi`. **Reactivado el 2026-09-27** tras la pausa por la incidencia 2026-03-30, ahora con límites seguros `10/minute;100/hour` por IP en `/auth/login`, `/auth/2fa/verify` y los endpoints WebAuthn de login. Key-func *proxy-aware* (valida `X-Forwarded-For` solo si el peer es IP privada) y kill-switch `RATE_LIMIT_DISABLED=1`. El 429 devuelve `{"error": "<mensaje en español>"}` y el frontend lo muestra en el recuadro de error del login.
 - **~~Política de Contraseñas Débil~~**: ✅ Validación implementada en `services.py:validar_password()` — mínimo 8 caracteres, letras, números y caracteres especiales.
 - **JWT Estático**: El tiempo de expiración es de 8 horas, pero no hay un sistema de "Revocación" o "Refresh Tokens" para sesiones robadas. ⚠️ Pendiente transferido al endurecimiento de VPS.
 - **~~Cabeceras de Seguridad HTTP~~**: ✅ Implementadas: `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`.
@@ -522,7 +559,7 @@ Se recomienda la siguiente jerarquía:
     - `Content-Security-Policy (CSP)`
 
 ### C. Seguridad en el Código (FastAPI)
-- **~~Rate Limiting~~**: ✅ Implementado (2026-09-27): `10/minute;100/hour` por IP en `/auth/login` y `/auth/2fa/verify` con `slowapi`; mensaje de error en español y kill-switch `RATE_LIMIT_DISABLED=1`. Se descartó el bloqueo de 1 hora tras 3 intentos por considerarse demasiado agresivo (fue la causa de la incidencia 2026-03-30).
+- **~~Rate Limiting~~**: ✅ Implementado (2026-09-27): `10/minute;100/hour` por IP en `/auth/login`, `/auth/2fa/verify` y los endpoints WebAuthn de login con `slowapi`; mensaje de error en español y kill-switch `RATE_LIMIT_DISABLED=1`. Se descartó el bloqueo de 1 hora tras 3 intentos por considerarse demasiado agresivo (fue la causa de la incidencia 2026-03-30).
 - **Validación de Datos**: Usar Pydantic para asegurar que no se inyecten scripts en los campos de texto.
 - **Secrets**: Usar un archivo `.env` con permisos restringidos (`chmod 600`) y cargarlos dinámicamente.
 
@@ -939,3 +976,96 @@ Se ha creado un módulo completamente nuevo y ciego para realizar auditorías f�
   3. `onScannerEnterOC`: si lo tecleado/escaneado no es un SKU exacto, ejecuta la búsqueda por texto; solo avisa «SKU no encontrado» y limpia cuando la búsqueda tampoco produce resultados. El escaneo de SKU exacto (código de barras) conserva su flujo intacto.
 - **Verificación (banco Node con el `oc.js` real + export real de la BD):** «Playera Blanca Dama» → 8 resultados (antes 0) · «playera blanca» → 20 (tope de lista) · mayúsculas, orden libre («blanca dama playera»), plural («playeras blancas dama») y códigos de modelo («c0200», «D0200») correctos · texto inexistente → 0 · Enter con texto conserva resultados sin toast · SKU real agrega y limpia · SKU desconocido avisa y limpia. Nota: «sudadera negra grande» da 0 porque hoy **no existen** productos de la categoría Sudadera en el catálogo (0 filas), no es fallo del buscador.
 - **Pendiente opcional (menor):** el resto de buscadores del frontend (`app.js`: inventario, Ctrl+K, etc.) siguen usando `includes()` literal; si se desea, se les puede aplicar el mismo criterio de tokens.
+
+### 30 de Septiembre de 2026 - Menores de auditoría cerrados (notif 404, limpieza, paginación estable)
+- **B1 · `PUT /notificaciones/{id}/leer` con id inexistente devolvía 500:** el servicio retornaba `None` y FastAPI fallaba al validar `response_model=NotificacionOut` (error de validación → 500). Ahora `main.py` verifica el resultado y lanza `HTTPException 404 "Notificación no encontrada"` (mismo patrón que el resto de routers). **Verificado en vivo:** sin token → 401 · id inexistente → 404 con detalle · id real (137) → 200.
+- **B2 · Limpieza de código muerto:**
+  - `backend/app/services.py`: eliminadas 3 líneas inalcanzables después del `return False` de `desactivar_totp_usuario`.
+  - `frontend/app.js` (referencia `v1.1.8`): eliminado el bloque `#session-badge` (ese elemento no existe en ningún HTML) y la variable `nombreMostrado` (sin uso); eliminado `window.closeLowStockAlert` + `lowStockAlertDismissed` (no referenciados en ningún archivo). El resto del bloque de sesión (nombre, rol y avatar de la barra lateral, que sí existen en `index.html`) queda intacto.
+  - `frontend/styles.css` (referencia `v2.0.1`): eliminadas las reglas huérfanas `.header-session` y `.session-badge` (ninguna usada en HTML/JS).
+- **B3 · Paginación estable en `get_ventas_agrupadas`:** se agregó desempate `.order_by(fecha.desc(), id.desc())` para que el orden por folios sea determinista entre páginas. Nota de escala: con 446 movimientos (176 ventas) el agrupado en Python es instantáneo; se decidió **no** reescribir a paginación SQL (riesgo en código crítico de reportes sin beneficio real al volumen actual).
+- **Verificación:** `node --check app.js` OK · `app.js?v=1.1.8` y `styles.css?v=2.0.1` servidos sin símbolos muertos · endpoints probados con token generado en el contenedor (401/404/200/200).
+
+### 30 de Septiembre de 2026 - Búsqueda flexible en todos los buscadores del frontend + espejo en backend
+- **Contexto:** el arreglo de `oc.js` (entrada anterior) quedó limitado al modal de Órdenes de Compra; el resto de buscadores seguía con `includes()` literal. Se generalizó el mismo criterio a **todos** los buscadores y se eliminó la lógica duplicada.
+- **`frontend/app.js` (referencia `v1.1.9`):** nuevo bloque de utilidades compartidas antes de la sección de autenticación:
+  - `BUSQUEDA_STOPWORDS` (conectores), `normalizarBusqueda()` (minúsculas + sin acentos vía NFD), `variantesBusqueda()` (plural y género por palabra: `playeras`→`playera`/`player`, `blanca`→`blanco`) y `coincideBusqueda(campos, query)` (todas las palabras deben aparecer en algún campo, en cualquier orden; consulta vacía o solo conectores → **no filtra**).
+  - Cinco puntos de búsqueda migrados: Inventario (`renderInventario`; nombre+SKU+notas+proveedores), Venta (`onFiltrarCategoria`; categoría y SKU), Historial (`renderHistorial`), Búsqueda Global Ctrl+K (`renderGsResults`) y Descuentos (`renderDescuentos`).
+- **`frontend/oc.js` (referencia `v1.0.5`):** eliminadas las funciones locales (`OC_STOPWORDS`, `ocNormalizarTexto`, `ocVariantesPalabra`); el buscador del modal ahora consume los helpers de `app.js` (el orden de carga app.js → oc.js lo garantiza). Se conserva su particularidad: consulta sin palabras útiles → «Sin resultados» (en el resto de pantallas, vacío = sin filtro).
+- **`backend/app/services.py` (espejo para `/ventas-agrupadas`):** los mismos helpers en Python (`_BUSQUEDA_STOPWORDS`, `_normalizar_busqueda` con `unicodedata` categoría `Mn`, `_variantes_busqueda`, `_coincide_busqueda`) y el filtro literal de `get_ventas_agrupadas` reemplazado — el buscador de Gestión de Ventas (`#gv-search`; folio/canal/productos/SKU) ahora acepta tokens desordenados, acentos, plural y género.
+- **Verificación:**
+  - Banco Node (oc.js real + catálogo real de 619 productos): 11/11 casos del helper + mismas salidas del modal que la entrada anterior; `node --check` OK en ambos JS.
+  - Backend (reinicio + token generado en el contenedor): «dama blanca playera» y «playeras blancas dama» → 15 grupos (antes 0) · «PLAYERA BLANCA DAMA» → 15 · «xyz123» → 0 · sin token → 401.
+  - Navegador (localhost:3000; servidos `app.js?v=1.1.9` y `oc.js?v=1.0.5`): Inventario «playera blanca dama» → 8 productos en 2 grupos padre (literal antes: 0) · Ctrl+K «playeras blancas dama» → 8 · Venta «playeras dama» → 132 opciones y SKU «c0200 negro» → 6 · Descuentos «KP 20» → 1 fila (cupón `KP20`; literal antes: 0) · Historial «playera blanca dama» → 21 movimientos (literal antes: 0).
+- **Nota:** «sudadera negra grande» sigue dando 0 porque no existen productos de esa categoría en el catálogo (mismo motivo documentado en la entrada de `oc.js`), no por el buscador.
+
+### 30 de Septiembre de 2026 - Escape HTML centralizado en el frontend (XSS almacenado)
+- **Problema (último punto del bloque D):** los campos de texto que captura el usuario (nombre de producto, SKU, notas internas, proveedores alternativos, conceptos de contabilidad, códigos de descuento, folios, etc.) se insertaban con `innerHTML` sin escapar; un producto guardado como `<img src=x onerror=...>` ejecutaba código en el navegador de cualquier usuario que abriera el inventario.
+- **Diseño de la solución (dos funciones, decisión deliberada):** en `frontend/app.js` (referencia `v1.2.0`), junto a las utilidades de búsqueda:
+  - `escapeHtml(s)` — para **texto visible y valores de atributos normales** (escapa `& < > " '`).
+  - `escapeJsAttr(s)` — para **argumentos de cadena dentro de `onclick="fn('...')"`**: primero escapa para JS (`\`, comilla simple, saltos de línea) y luego para HTML. Es necesario porque el navegador **decodifica las entidades HTML antes** de que el handler de JS se parsee: si aquí se usara solo `escapeHtml`, un nombre con `'` rompería el handler.
+  - `escapeHtml(null)` devuelve `''`, de modo que los respaldos `escapeHtml(x) || '—'` siguen funcionando.
+- **Aplicación (barrido completo por módulo, reemplazando interpolaciones directas en `innerHTML`):**
+  - `app.js` (`v1.2.0`): toast (el mensaje ahora se escapa dentro de la propia función), breadcrumb, filas padre/color/variante del inventario, carrito de venta, historial, reportes, ventas recientes y agrupadas, modal de devolución, búsqueda global Ctrl+K, auditoría, respaldos, usuarios, notificaciones, descuentos, subcategorías y campos de variante.
+  - `oc.js` (`v1.0.6`): eliminada la función local `esc()` (solo escapaba comillas para JS, insuficiente); todos sus puntos ahora usan los helpers de `app.js` (el orden de carga lo garantiza).
+  - `dashboard.js` (`v1.0.1`): tablas del modal de Alertas Inteligentes.
+  - `conteo.js` (`v1.0.2`): tarjetas del conteo físico.
+  - `contabilidad.js` (`v1.0.1`): transacciones y catálogo de insumos.
+  - `index.html`: cache-busters actualizados a las referencias anteriores.
+- **Verificación:**
+  - `node --check` OK en los 5 archivos; grep de cierre confirmó que los únicos `onclick="${...}"` restantes son invocaciones con IDs numéricos o argumentos ya escapados.
+  - Prueba de ejecución en navegador con **cargas maliciosas en memoria** (sin escribir en la BD): producto falso y descuento falso con payloads `<img onerror>`, `<svg onload>` etc. en nombre, SKU, categoría, proveedores, notas y códigos → **0 elementos inyectados** en inventario, Ctrl+K, modal de OC, descuentos, ventas y toast; el HTML serializado mostraba entidades (`&lt;img`) y el texto quedaba literal; `window.__xss` nunca se activó.
+  - Prueba funcional: el botón real «Historial de Precios» de un producto normal (clic real) abrió su modal correctamente — confirma que las entidades en `onclick` se decodifican y ejecutan bien para datos normales.
+  - Limpieza: datos falsos retirados del estado en memoria y pantallas re-renderizadas (619 productos, sin residuos); consola del navegador sin errores.
+
+### 30 de Septiembre de 2026 - Preparación VPS (código): fin de credenciales incrustadas y Alembic confiable
+- **Contexto:** el repositorio estuvo en GitHub con contraseñas reales en el historial (`.env` filtrado); además había credenciales incrustadas (hardcoded) en varios archivos que rompían el principio de configuración por entorno y hacían inservible el código en un servidor nuevo.
+- **`backend/app/database.py`:** eliminado el respaldo con contraseña incrustada. Ahora, si `DATABASE_URL` no está definida, la aplicación falla de inmediato con un `RuntimeError` que indica copiar `.env.example` a `.env`. Sin credenciales silenciosas en el código.
+- **`backend/app/services.py`:**
+  - `seed_admin_if_empty` ya no crea el admin con contraseña fija: usa `ADMIN_INITIAL_PASSWORD` si existe; si no, genera una aleatoria (`secrets.token_urlsafe(16)`) y la imprime **una única vez** en los logs del arranque (con aviso de cambiarla). `USUARIO ADMIN CREADO AUTOMÁTICAMENTE`.
+  - Los dos respaldos de contraseña en `crear_backup_db` y `restaurar_backup_db` (usados al parsear `DATABASE_URL` del contenedor) ya no caen en una contraseña incrustada: leen `POSTGRES_PASSWORD` del entorno y, si falta, registran un error claro y devuelven `None`/`False`.
+- **Scripts operativos saneados (sin credenciales ni URLs incrustadas):**
+  - `app/reset_admin_2fa.py` — requiere `ADMIN_RESET_PASSWORD` por entorno (`docker exec -e ADMIN_RESET_PASSWORD='...'`).
+  - `test_api.py` — requiere `TEST_ADMIN_PASSWORD` por entorno.
+  - `backfill_june.py` y `db_patch.py` — requieren `DATABASE_URL` por entorno (`SystemExit` con mensaje si falta).
+- **`.env.example`:** documenta la nueva variable opcional `ADMIN_INITIAL_PASSWORD` (solo se usa la primera vez con BD vacía).
+- **Alembic confiable (la migración fallaba en servidores nuevos):**
+  - Causa raíz: el esquema siempre lo creó `create_all` del lifespan (main.py), no Alembic; la tabla `alembic_version` existía vacía (nunca sellada) y la migración `0f0cc4f0840a` asumía tablas ya creadas → en una BD nueva fallaba y en la de desarrollo habría chocado con `ALTER` de columnas existentes.
+  - Solución: `0f0cc4f0840a` reescrita como **baseline idempotente**: `models.Base.metadata.create_all(bind)` como base + guardas con `sa.inspect()` antes de cada operación (columnas `tipo_compra`, `canal_compra`, `marca`, `pago_msi`, `meses_msi`; índice único `ix_usuarios_email`; FK `fk_movimientos_producto_id` con `ondelete='SET NULL'`). El id de revisión y `down_revision=None` no cambian.
+  - **Verificación en BD nueva** (`alembic_test`): creó las 12 tablas, selló la revisión, la segunda ejecución fue un no-op (idempotente) y los objetos incrementales quedaron creados; BD de prueba eliminada.
+  - **Verificación en BD de desarrollo:** respaldo previo (`backup_20260930_125036.sql`); 5 movimientos huérfanos (productos ya eliminados) normalizados a `producto_id = NULL` — misma semántica que `ondelete='SET NULL'`; `alembic upgrade head` selló `0f0cc4f0840a` y creó la FK y el índice único. Datos intactos: 619 productos, 446 movimientos, 12 tablas, `/health OK`.
+- **Decisiones del usuario (2026-09-30):** rotación de credenciales **ejecutada** ese mismo día (ver entrada siguiente); el mapeo `5432:5432` se conserva por ahora con advertencia explícita en `docker-compose.yml` (retirarlo antes del VPS sigue siendo obligatorio); respaldos automáticos sin cambios (24 h / 7 copias); endurecimiento del VPS **solo documentado** (ver «Guía de endurecimiento para VPS»).
+
+### 30 de Septiembre de 2026 - Rotación de credenciales ejecutada (contraseña de BD + `SECRET_KEY`)
+- **Contexto:** la contraseña de PostgreSQL, la `SECRET_KEY` y la del admin quedaron publicadas en el historial de GitHub; el usuario aprobó rotarlas ahora desde la máquina local. Los valores nuevos nunca se imprimieron en pantalla (generados y escritos en el momento).
+- **Qué se rotó:** contraseña del rol `inventario` en PostgreSQL (`ALTER ROLE ... PASSWORD`, 24 bytes hex = 48 caracteres seguros para URL/SQL) y, en `.env`, `POSTGRES_PASSWORD`, la contraseña dentro de `DATABASE_URL` y `SECRET_KEY` (32 bytes hex). Respaldo previo del `.env` guardado **fuera del repositorio** (`~/.qoder/tmp/env_pre_rotacion_*.bak`).
+- **Orden a prueba de fallos:** pre-chequeo del formato del `.env` → `ALTER ROLE` (si falla, aborta antes de tocar el `.env`) → reescritura del `.env` respetando CRLF → verificación enmascarada («restos de valores antiguos: ninguno»).
+- **Consecuencias esperadas:** todos los JWT emitidos quedaron invalidados (los usuarios deben iniciar sesión de nuevo); el contenedor `db` conserva la contraseña vieja en su entorno (inerte: PostgreSQL solo la usa al crear el volumen) y la siguiente recreación completa la purga. La contraseña del admin se restablece cuando el usuario quiera: `docker exec -e ADMIN_RESET_PASSWORD='<nueva-contraseña>' inventario_api python -m app.reset_admin_2fa`.
+- **Verificación end-to-end (con la imagen reconstruida, ver entrada siguiente):** `/health` → 200; consulta desde el contenedor con la contraseña nueva → 619 productos, 446 movimientos, 1 usuario; respaldo de prueba creado por `pg_dump` con la contraseña nueva (`backup_20260930_134659.sql`) y limpieza de copias antiguas funcionando; `/productos` sin token → 401; frontend `:3000` → 200.
+- **Prueba en navegador de la invalidación de sesiones:** se tomó un JWT auténtico emitido a las 12:42 (una hora **antes** de la rotación, aún vigente por fecha hasta las 20:42) y se cargó como sesión activa: al recargar, `GET /auth/me` respondió **401** (firma ya no coincide con la `SECRET_KEY` nueva), la app ejecutó el logout automático (hallazgo #9) y mostró «⏰ Tu sesión expiró. Inicia sesión de nuevo.»; el token quedó borrado de `localStorage`. Es la prueba directa de que **todas** las sesiones emitidas antes de la rotación quedaron invalidadas.
+
+### 30 de Septiembre de 2026 - `requirements.txt` corrupto (python-dateutil) y build local con TLS interceptado
+- **Síntoma:** al recrear el contenedor del backend para aplicar el `.env` rotado, entró en bucle de reinicio: `ModuleNotFoundError: No module named 'dateutil'` (`services.py` y `backfill_june.py` importan `dateutil.relativedelta`).
+- **Causa raíz:** la última línea de `backend/requirements.txt` estaba codificada en **UTF-16LE** (`p\0y\0t\0h\0o\0n\0...\0\r\0\n\0`) — una edición histórica mezcló texto de 16 bits dentro del archivo UTF-8 y pip nunca interpretó esa línea, así que la imagen jamás instaló `python-dateutil`. Pasaba inadvertido porque el contenedor en marcha lo tenía instalado a mano (instalación que se pierde en cada recreación).
+- **Corrección:** `requirements.txt` reescrito limpio (UTF-8/LF) con `python-dateutil==2.9.0.post0` explícito.
+- **Segundo obstáculo — build local:** `docker compose build` fallaba en `pip install` con `CERTIFICATE_VERIFY_FAILED` hacia pypi.org (interceptación TLS del antivirus local — mismo origen que el problema de git). Solución en `backend/Dockerfile`: `ARG PIP_EXTRA=""` → **vacío por defecto (el VPS compila con TLS estricto)**; la máquina local compila con `--build-arg PIP_EXTRA="--trusted-host pypi.org --trusted-host files.pythonhosted.org"`.
+- **Verificación:** imagen reconstruida; contenedor arriba y estable (sin bucle); resultados de la rotación al final de la entrada anterior. El respaldo programado del scheduler (24 h) corrió en el arranque y limpió copias antiguas, como estaba diseñado.
+- **Pendiente de commit (cuando el usuario lo pida):** este `requirements.txt`, el `Dockerfile` con `PIP_EXTRA`, la advertencia del `5432` en `docker-compose.yml` y estas entradas de bitácora.
+
+### 30 de Septiembre de 2026 - Passkeys (WebAuthn) como segundo factor de inicio de sesión
+- **Contexto:** el usuario preguntó si el login puede quedar anclado a una llave pública/privada. Se decidió (elección del usuario) implementar **passkeys (WebAuthn/FIDO2) como segundo factor tras la contraseña**, **conviviendo** con el TOTP actual (no lo sustituye): el usuario elige en pantalla el método que tenga configurado. La llave privada vive en el dispositivo (Windows Hello, huella, llave USB) y **nunca sale de él**; el servidor guarda solo la llave pública.
+- **Modelo y migración:** nueva tabla `webauthn_credentials` en `models.py` (usuario_id FK `ondelete=CASCADE`, `credential_id` único, `public_key`, `sign_count`, `transports`, `nombre`, creado, ultimo_uso). Migración Alembic `a3f8c2d91b47` (encadenada sobre `0f0cc4f0840a`), con la misma guarda idempotente `sa.inspect(bind).has_table` que el baseline.
+- **Backend (`services.py`, sección WebAuthn):** `py_webauthn==3.0.1`; configuración por entorno `WEBAUTHN_RP_ID` (def. `localhost`), `WEBAUTHN_RP_NAME` (def. `Inventario Pro`), `WEBAUTHN_ORIGIN` (def. `http://localhost:3000`, admite lista) documentadas en `.env.example`. Retos de registro/login en memoria con TTL de 5 min (válido con el único worker de uvicorn del compose). `user_verification=required` (huella/PIN obligatorios), verificación de `sign_count` contra clonación (401 si retrocede) y actualización de `ultimo_uso`.
+- **Endpoints (routers delgados en `main.py`):** gestión autenticada — `POST /auth/webauthn/register/options`, `POST /auth/webauthn/register/verify`, `GET /auth/webauthn/credenciales`, `DELETE /auth/webauthn/credenciales/{id}`; login — `POST /auth/webauthn/login/options` y `POST /auth/webauthn/login/verify` (públicos, exigen `temp_token` de 5 min con claim `2fa_pending`; rate limit `10/min;100/h`). `POST /auth/login` ahora devuelve además `metodos_2fa` (`["totp"]`, `["passkey"]` o ambos) para que el frontend pinte la pantalla de verificación correcta.
+- **Frontend (`app.js` v1.3.0, `index.html`):** pantalla 2FA unificada que muestra botón passkey «🔑 Usar huella / PIN» y/o el bloque TOTP (con separador «— o —» si hay ambos), mensaje informativo si el navegador no soporta passkeys; helpers base64url↔ArrayBuffer; gestión desde la barra lateral con botón 🔑 «Passkey» (visible solo si el navegador puede usarlas) → modal para registrar este dispositivo (con nombre), listar y eliminar credenciales.
+- **Operación:** `reset_admin_2fa.py` ahora también elimina las passkeys del usuario al resetear; `backend/test_webauthn_flow.py` (prueba de flujo completo, autoclimpiante): 30/30 verificaciones OK.
+- **Verificación end-to-end en navegador (autenticador software inyectado):** registro de passkey desde la UI → aparece en la lista → eliminación → re-registro; login completo «contraseña → pantalla 2FA solo-passkey → JWT»; caso negativo (cancelar verificación) muestra error en español y no deja sesión; auditoría en BD: eventos WEBAUTHN_REGISTER / WEBAUTHN_DELETE / LOGIN_WEBAUTHN y `sign_count=1` (anti-clonación activa). Usuario de prueba creado en el contenedor y **eliminado al terminar** (0 residuos).
+- **Limitación / VPS:** WebAuthn exige **contexto seguro** — funciona en `localhost` y en HTTPS, **no** en IP plana por LAN. Antes del despliegue definir `WEBAUTHN_RP_ID`, `WEBAUTHN_RP_NAME` y `WEBAUTHN_ORIGIN` en el `.env` del servidor (con el dominio real).
+- **Pendiente de commit (cuando el usuario lo pida):** `models.py`, migración `a3f8c2d91b47`, `services.py`, `main.py`, `app.js`/`index.html`, `reset_admin_2fa.py`, `.env.example`, `test_webauthn_flow.py`, `requirements.txt` (py_webauthn) y esta entrada de bitácora.
+
+### 30 de Septiembre de 2026 - Snapshot completo del proyecto + guía de migración al VPS
+
+- **Contexto:** el usuario quiere llevarse todo al VPS y ya cuenta con `snapshot.py`; pidió crear el snapshot con el trabajo de hoy (passkeys y correcciones) y una secuencia copiar-y-pegar para restaurarlo en el servidor.
+- **Snapshot creado:** `versiones_seguras/Inventario_Snapshot_20260930_152728.zip` (12.0 MB; 1.762 archivos) con el código completo, `.env` local, `backups/`, `base_de_datos_snapshot.sql` (269 KB) y la migración de passkeys `a3f8c2d91b47`. Los contenedores se detuvieron ~1 min durante el empaquetado y se levantaron de nuevo (verificado: `/health` 200; BD intacta con 619 productos / 446 movimientos y sello `a3f8c2d91b47`).
+- **Detalle operativo:** en esta máquina (consola cp1252) `snapshot.py` falla con `UnicodeEncodeError` por los emojis de sus `print`; se ejecuta con `python -X utf8 snapshot.py`. El ZIP incluye `backend/.venv` (venv de Windows) — inútil en Linux; se documentó su borrado en el VPS.
+- **Documentación:** nueva subsección «Variante rápida: migrar todo desde un snapshot» dentro de la Guía de endurecimiento (contenido del ZIP, edits obligatorios pre-arranque, orden seguro de restauración — `up db` → `pg_isready` → `psql` → `up --build` — y recambio del RP ID de las passkeys).

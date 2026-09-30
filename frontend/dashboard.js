@@ -366,11 +366,11 @@ window.abrirModalAlertas = function() {
   d.stock_bajo_prioritario.forEach(p => {
     tBajo.innerHTML += `
       <tr>
-        <td><strong>${p.nombre}</strong><br><small>${p.sku}</small></td>
+        <td><strong>${escapeHtml(p.nombre)}</strong><br><small>${escapeHtml(p.sku)}</small></td>
         <td style="color:var(--tertiary); font-weight:bold;">${p.qty}</td>
         <td>${p.min_stock}</td>
         <td>${p.ventas_historicas} uds</td>
-        <td><button class="btn-add-oc" id="btn-alerta-${p.id}" onclick="toggleAlertaSeleccion(${p.id}, '${p.nombre.replace(/'/g, "\\'")}', this)"><span class="icon">+</span> Seleccionar</button></td>
+        <td><button class="btn-add-oc" id="btn-alerta-${p.id}" onclick="toggleAlertaSeleccion(${p.id}, '${escapeJsAttr(p.nombre)}', this)"><span class="icon">+</span> Seleccionar</button></td>
       </tr>
     `;
   });
@@ -382,11 +382,11 @@ window.abrirModalAlertas = function() {
   d.sin_stock_prioritario.forEach(p => {
     tAgotado.innerHTML += `
       <tr>
-        <td><strong>${p.nombre}</strong><br><small>${p.sku}</small></td>
+        <td><strong>${escapeHtml(p.nombre)}</strong><br><small>${escapeHtml(p.sku)}</small></td>
         <td style="color:var(--error); font-weight:bold;">${p.qty}</td>
         <td>${p.min_stock}</td>
         <td>${p.ventas_historicas} uds</td>
-        <td><button class="btn-add-oc" id="btn-alerta-${p.id}" onclick="toggleAlertaSeleccion(${p.id}, '${p.nombre.replace(/'/g, "\\'")}', this)"><span class="icon">+</span> Seleccionar</button></td>
+        <td><button class="btn-add-oc" id="btn-alerta-${p.id}" onclick="toggleAlertaSeleccion(${p.id}, '${escapeJsAttr(p.nombre)}', this)"><span class="icon">+</span> Seleccionar</button></td>
       </tr>
     `;
   });

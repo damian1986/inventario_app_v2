@@ -493,15 +493,22 @@ async def login(request: Request, data: schemas.LoginRequest, db: AsyncSession =
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Si tiene 2FA activado, no entregar el token final aún
+    # Si tiene algún segundo factor activado, no entregar el token final aún
+    metodos: List[str] = []
     if user.totp_enabled:
+        metodos.append("totp")
+    if await services.usuario_tiene_passkeys(db, user.id):
+        metodos.append("passkey")
+
+    if metodos:
         from datetime import timedelta
         # Token temporal de corta duración (5 min) con claim especial
         temp_token = create_access_token({"sub": user.username, "2fa_pending": True}, expires_delta=timedelta(minutes=5))
         return schemas.TokenResponse(
             requires_2fa=True,
             temp_token=temp_token,
-            username=user.username
+            username=user.username,
+            metodos_2fa=metodos,
         )
 
     # Login normal
@@ -565,6 +572,123 @@ async def verify_2fa(request: Request, data: schemas.TOTPVerifyRequest, db: Asyn
         detalles={"rol": user.rol}
     )
     
+    return schemas.TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        rol=user.rol,
+        username=user.username,
+        nombre=user.nombre,
+        id=user.id,
+    )
+
+
+# ── PASSKEYS (WEBAUTHN) ──────────────────────────────────────────────
+
+@app.post("/auth/webauthn/register/options")
+async def webauthn_register_options(
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user),
+):
+    """Paso 1 del registro de passkey: opciones de creación para el navegador."""
+    return await services.webauthn_opciones_registro(db, current_user)
+
+
+@app.post("/auth/webauthn/register/verify", response_model=schemas.WebAuthnCredentialOut, status_code=201)
+async def webauthn_register_verify(
+    data: schemas.WebAuthnRegisterVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user),
+):
+    """Paso 2 del registro de passkey: valida la atestación y guarda la llave pública."""
+    cred = await services.webauthn_verificar_registro(db, current_user, data.credential, data.nombre)
+    await services.registrar_log(
+        db, usuario_id=current_user.id, username=current_user.username,
+        accion="WEBAUTHN_REGISTER", recurso="Usuario", recurso_id=str(current_user.id),
+        detalles={"nombre": cred.nombre},
+    )
+    return cred
+
+
+@app.get("/auth/webauthn/credenciales", response_model=List[schemas.WebAuthnCredentialOut])
+async def webauthn_listar_credenciales(
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user),
+):
+    """Lista las passkeys registradas del usuario actual."""
+    return await services.listar_passkeys(db, current_user.id)
+
+
+@app.delete("/auth/webauthn/credenciales/{cred_id}")
+async def webauthn_eliminar_credencial(
+    cred_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user),
+):
+    """Elimina una passkey del usuario actual."""
+    await services.eliminar_passkey(db, current_user.id, cred_id)
+    await services.registrar_log(
+        db, usuario_id=current_user.id, username=current_user.username,
+        accion="WEBAUTHN_DELETE", recurso="Usuario", recurso_id=str(current_user.id),
+        detalles={"credencial_id": cred_id},
+    )
+    return {"status": "ok", "message": "Passkey eliminada"}
+
+
+@app.post("/auth/webauthn/login/options")
+@limiter.limit("10/minute;100/hour", error_message="Demasiados intentos de verificación 2FA. Espera un momento e inténtalo de nuevo.")
+async def webauthn_login_options(
+    request: Request,
+    data: schemas.WebAuthnLoginOptionsRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Segundo paso del login con passkey: opciones de autenticación para el navegador."""
+    from app.auth import decode_token
+    if not data.temp_token:
+        raise HTTPException(status_code=401, detail="Se requiere token temporal")
+
+    payload = decode_token(data.temp_token)
+    if not payload.get("2fa_pending"):
+        raise HTTPException(status_code=401, detail="Token no válido para 2FA")
+
+    q = await db.execute(select(models.Usuario).where(models.Usuario.username == payload.get("sub")))
+    user = q.scalar_one_or_none()
+    if not user or not user.activo:
+        raise HTTPException(status_code=401, detail="Usuario no válido")
+
+    return await services.webauthn_opciones_login(db, user)
+
+
+@app.post("/auth/webauthn/login/verify", response_model=schemas.TokenResponse)
+@limiter.limit("10/minute;100/hour", error_message="Demasiados intentos de verificación 2FA. Espera un momento e inténtalo de nuevo.")
+async def webauthn_login_verify(
+    request: Request,
+    data: schemas.WebAuthnLoginVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Segundo paso del login con passkey: valida la firma y entrega el JWT final."""
+    from app.auth import decode_token
+    if not data.temp_token:
+        raise HTTPException(status_code=401, detail="Se requiere token temporal")
+
+    payload = decode_token(data.temp_token)
+    if not payload.get("2fa_pending"):
+        raise HTTPException(status_code=401, detail="Token no válido para 2FA")
+
+    username = payload.get("sub")
+    await services.webauthn_verificar_login(db, username, data.credential)
+
+    q = await db.execute(select(models.Usuario).where(models.Usuario.username == username))
+    user = q.scalar_one_or_none()
+    if not user or not user.activo:
+        raise HTTPException(status_code=401, detail="Usuario no válido")
+
+    token = create_access_token({"sub": user.username, "rol": user.rol})
+    await services.registrar_log(
+        db, usuario_id=user.id, username=user.username,
+        accion="LOGIN_WEBAUTHN", recurso="Sistema", recurso_id=str(user.id),
+        detalles={"rol": user.rol}
+    )
+
     return schemas.TokenResponse(
         access_token=token,
         token_type="bearer",
@@ -785,7 +909,10 @@ async def listar_notificaciones(db: AsyncSession = Depends(get_db)):
 @app.put("/notificaciones/{id}/leer", response_model=schemas.NotificacionOut,
          dependencies=[Depends(require_role("admin", "vendedor", "bodeguero"))])
 async def leer_notificacion(id: int, db: AsyncSession = Depends(get_db)):
-    return await services.marcar_notificacion_leida(db, id)
+    n = await services.marcar_notificacion_leida(db, id)
+    if not n:
+        raise HTTPException(status_code=404, detail="Notificación no encontrada")
+    return n
 
 
 @app.delete("/notificaciones", status_code=204,

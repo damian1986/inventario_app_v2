@@ -7,7 +7,7 @@
     <!-- Evitar error 404 de favicon -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📦</text></svg>">
     <!-- CSS -->
-    <link rel="stylesheet" href="styles.css?v=2.0.0" />
+    <link rel="stylesheet" href="styles.css?v=2.0.1" />
     <!-- External Libraries -->
     <script src="https://cdn.jsdelivr.net/npm/exceljs@4.3.0/dist/exceljs.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
@@ -47,21 +47,30 @@
       </div>
     </div>
 
-    <!-- PANTALLA DE 2FA (TOTP) -->
+    <!-- PANTALLA DE 2FA (PASSKEY + TOTP) -->
     <div id="page-2fa" class="login-overlay" style="display:none;">
       <div class="login-card">
         <div class="login-logo">🔐</div>
         <h2 class="login-title">Verificación 2FA</h2>
-        <p class="login-sub">El acceso requiere un código de seguridad adicional.</p>
+        <p class="login-sub" id="2fa-sub">El acceso requiere un segundo factor de seguridad.</p>
         
         <div id="2fa-error" class="login-error" style="display:none;"></div>
-        
-        <div class="form-group">
-          <label for="login-2fa-code">Código de Seguridad (6 dígitos)</label>
-          <input type="text" id="login-2fa-code" placeholder="000000" maxlength="6" inputmode="numeric" style="text-align:center; font-size:1.5rem; letter-spacing:5px;" autocomplete="one-time-code">
+
+        <div id="2fa-passkey-block" style="display:none; margin-bottom:15px;">
+          <button class="btn btn-primary btn-block" id="btn-2fa-passkey" onclick="doVerifyPasskey()">🔑 Usar huella / PIN (passkey)</button>
+          <p style="font-size:0.75rem; color:#888; margin-top:8px;">Usa Windows Hello, Touch ID o el PIN de este dispositivo.</p>
         </div>
-        
-        <button class="btn btn-primary btn-block" onclick="doVerify2FA()">Verificar Código</button>
+
+        <div id="2fa-divider" style="display:none; color:#999; font-size:0.8rem; margin:15px 0;">— o —</div>
+
+        <div id="2fa-totp-block">
+          <div class="form-group">
+            <label for="login-2fa-code">Código de Seguridad (6 dígitos)</label>
+            <input type="text" id="login-2fa-code" placeholder="000000" maxlength="6" inputmode="numeric" style="text-align:center; font-size:1.5rem; letter-spacing:5px;" autocomplete="one-time-code">
+          </div>
+          <button class="btn btn-primary btn-block" onclick="doVerify2FA()">Verificar Código</button>
+        </div>
+
         <button class="btn btn-outline btn-block" style="margin-top:10px;" onclick="cancel2FA()">Regresar al Login</button>
       </div>
     </div>
@@ -149,7 +158,10 @@
           </div>
           <div style="margin-top:12px; display:flex; gap:8px;">
             <button class="btn btn-sm btn-outline" style="flex:1; padding:5px; font-size:0.75rem" onclick="if(window.open2FASetup) open2FASetup()" title="Configurar 2FA">🔐 2FA</button>
-            <button class="btn btn-sm btn-outline" style="flex:1; padding:5px; font-size:0.75rem; color:#ef4444; border-color:#fca5a5;" onclick="sessionStorage.clear(); localStorage.clear(); window.location.reload();" title="Cerrar sesión">🚪 Salir</button>
+            <button class="btn btn-sm btn-outline" id="btn-passkey-manage" style="flex:1; padding:5px; font-size:0.75rem; display:none;" onclick="if(window.openPasskeySetup) openPasskeySetup()" title="Passkeys (huella / PIN)">🔑 Passkey</button>
+          </div>
+          <div style="margin-top:8px;">
+            <button class="btn btn-sm btn-outline" style="width:100%; padding:5px; font-size:0.75rem; color:#ef4444; border-color:#fca5a5;" onclick="sessionStorage.clear(); localStorage.clear(); window.location.reload();" title="Cerrar sesión">🚪 Salir</button>
           </div>
         </div>
       </aside>
@@ -1482,6 +1494,31 @@
       </div>
     </div>
 
+    <!-- MODAL PASSKEYS (WEBAUTHN) -->
+    <div class="overlay" id="overlay-passkey-setup">
+      <div class="modal modal-md">
+        <h2 style="margin-bottom:10px;">🔑 Passkeys</h2>
+        <p style="font-size:0.9rem; color:#666; margin-bottom:15px;">Un segundo factor sin códigos: usa la huella, el rostro o el PIN de tu dispositivo (Windows Hello, Touch ID o llave USB). La llave privada nunca sale de tu dispositivo.</p>
+
+        <div id="passkey-msg" class="login-error" style="display:none; margin-bottom:10px;"></div>
+
+        <div id="passkey-list" style="max-height:220px; overflow-y:auto; border:1px solid #eee; border-radius:8px; margin-bottom:15px;">
+          <p style="padding:12px; color:#999; font-size:0.85rem;">Cargando…</p>
+        </div>
+
+        <div class="form-group" style="margin-bottom:10px;">
+          <label for="passkey-name" style="font-size:0.85rem;">Nombre (opcional)</label>
+          <input type="text" id="passkey-name" placeholder="Ej: PC oficina" maxlength="100" autocomplete="off">
+        </div>
+
+        <button class="btn btn-primary btn-block" id="btn-passkey-add" onclick="registrarPasskey()">➕ Registrar este dispositivo</button>
+
+        <div class="modal-footer" style="justify-content:center; margin-top:10px;">
+          <button class="btn btn-outline" onclick="closeModal('passkey-setup')">Cerrar</button>
+        </div>
+      </div>
+    </div>
+
     <!-- MODAL HISTORIAL PRECIOS -->
     <div class="overlay" id="overlay-historial-precio">
       <div class="modal">
@@ -1658,11 +1695,11 @@
       </div>
     </div>
 
-    <script src="app.js?v=1.1.7"></script>
-    <script src="oc.js?v=1.0.4"></script>
-    <script src="dashboard.js?v=1.0.0"></script>
-    <script src="conteo.js?v=1.0.1"></script>
-    <script src="contabilidad.js?v=1.0.0"></script>
+    <script src="app.js?v=1.3.0"></script>
+    <script src="oc.js?v=1.0.6"></script>
+    <script src="dashboard.js?v=1.0.1"></script>
+    <script src="conteo.js?v=1.0.2"></script>
+    <script src="contabilidad.js?v=1.0.1"></script>
 
     <!-- Modal Alertas Inteligentes -->
     <div class="overlay" id="overlay-alertas-inteligentes">

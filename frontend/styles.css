@@ -1386,20 +1386,6 @@ input[readonly] { background: var(--surface-container-low); }
   font-size: 0.75rem;
   color: var(--on-surface-variant);
 }
-.header-session {
-  display: flex;
-  align-items: center;
-  gap: 15px;
-}
-.session-badge {
-  background: rgba(178, 140, 255, 0.15);
-  color: var(--primary);
-  padding: 6px 12px;
-  border-radius: 20px;
-  font-size: 0.85rem;
-  font-weight: 600;
-}
-
 /* ══════════════════════════════════════════════════════════════════ */
 /* AUDIT LOG — Premium                                               */
 /* ══════════════════════════════════════════════════════════════════ */

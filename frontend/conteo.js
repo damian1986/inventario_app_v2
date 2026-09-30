@@ -35,8 +35,8 @@ function renderConteo() {
 
     row.innerHTML = `
       <div class="cart-item-details" style="flex:2">
-        <strong>${c.producto.nombre}</strong><br>
-        <span style="font-size:0.8rem; color:#666">Cod. Referencia: ${c.producto.sku || 'N/A'}</span>
+        <strong>${escapeHtml(c.producto.nombre)}</strong><br>
+        <span style="font-size:0.8rem; color:#666">Cod. Referencia: ${escapeHtml(c.producto.sku || 'N/A')}</span>
       </div>
       <div style="flex:1; text-align:center;">
         Sist: ${c.producto.qty} | Fís: <strong>${c.countQty}</strong>

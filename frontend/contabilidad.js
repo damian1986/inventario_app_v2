@@ -75,9 +75,9 @@ window.renderContabilidad = async function() {
         <tr style="border-bottom:1px solid #f1f5f9;">
           <td style="padding:10px 12px;">${fecha}</td>
           <td style="padding:10px 12px;">${tipoBadge}</td>
-          <td style="padding:10px 12px;">${tx.concepto || '—'}</td>
-          <td style="padding:10px 12px;">${tx.procedencia_destino || '—'}</td>
-          <td style="padding:10px 12px;">${tx.referencia_id ? `OC-${tx.referencia_id}` : '—'}</td>
+          <td style="padding:10px 12px;">${escapeHtml(tx.concepto || '—')}</td>
+          <td style="padding:10px 12px;">${escapeHtml(tx.procedencia_destino || '—')}</td>
+          <td style="padding:10px 12px;">${tx.referencia_id ? `OC-${escapeHtml(tx.referencia_id)}` : '—'}</td>
           <td style="padding:10px 12px; text-align:right; font-weight:600; color:${montoColor};">${montoSign}${mxn(tx.monto)}</td>
         </tr>
       `;
@@ -173,15 +173,15 @@ async function cargarListaInsumos() {
     }
     body.innerHTML = insumos.map(i => `
       <tr>
-        <td style="padding:8px 10px; font-weight:500;">${i.nombre}</td>
-        <td style="padding:8px 10px; color:#6b7280;">${i.descripcion || '—'}</td>
+        <td style="padding:8px 10px; font-weight:500;">${escapeHtml(i.nombre)}</td>
+        <td style="padding:8px 10px; color:#6b7280;">${escapeHtml(i.descripcion || '—')}</td>
         <td style="padding:8px 10px; text-align:center;">
           <button class="btn btn-sm btn-danger" onclick="eliminarInsumo(${i.id})" title="Eliminar">🗑️</button>
         </td>
       </tr>
     `).join('');
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="3" style="color:red; padding:10px;">Error: ${e.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="3" style="color:red; padding:10px;">Error: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 

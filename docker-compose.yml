@@ -4,6 +4,10 @@ services:
     image: postgres:16-alpine
     container_name: inventario_db
     restart: unless-stopped
+    # ⚠️ PUERTO 5432 MAPEADO AL HOST — se conserva a propósito (2026-09-30)
+    # para herramientas de BD locales y ejecución del backend fuera de Docker.
+    # ACCIÓN OBLIGATORIA antes de desplegar en VPS: eliminar el mapeo
+    # "5432:5432" (la app usa la red interna de Docker; el host no lo necesita).
     ports:
       - "5432:5432"
     env_file:

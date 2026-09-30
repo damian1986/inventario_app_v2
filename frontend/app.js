@@ -6,6 +6,71 @@ window.collapsedGroups = new Set();
 let skipMovimientos = 0;
 let limitMovimientos = 200;
 
+// ── BÚSQUEDA FLEXIBLE (compartida con oc.js) ─────────────────────────
+// TODAS las palabras del texto deben aparecer (en cualquier orden), sin
+// distinguir mayúsculas ni acentos, tolerando plural y género
+// (blanca→blanco, playeras→playera). Ej.: "Playera Blanca Dama" encuentra
+// "Playera Dama Peso D0200 - Blanco Chica". Si el texto no deja palabras
+// útiles (vacío o solo conectores), no se filtra nada.
+const BUSQUEDA_STOPWORDS = new Set(['de','del','la','el','los','las','un','una','unos','unas','y','o','con','para','por','en','al']);
+
+function normalizarBusqueda(s) {
+  return String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function variantesBusqueda(palabra) {
+  const vars = new Set([palabra]);
+  // Plural: playeras→playera, colores→color
+  if (palabra.length > 2 && palabra.endsWith('s')) {
+    const sinS = palabra.slice(0, -1);
+    vars.add(sinS);
+    if (sinS.length > 2 && sinS.endsWith('e')) vars.add(sinS.slice(0, -1));
+  }
+  // Género: blanca→blanco, negro→negra
+  for (const v of [...vars]) {
+    if (v.length > 2) {
+      if (v.endsWith('a')) vars.add(v.slice(0, -1) + 'o');
+      else if (v.endsWith('o')) vars.add(v.slice(0, -1) + 'a');
+    }
+  }
+  return [...vars];
+}
+
+function coincideBusqueda(campos, query) {
+  const palabras = normalizarBusqueda(query).trim().split(/\s+/)
+    .filter(w => w.length >= 2 && !BUSQUEDA_STOPWORDS.has(w));
+  if (palabras.length === 0) return true;
+  const textos = (campos || []).map(c => normalizarBusqueda(c)).filter(Boolean);
+  return palabras.every(w => variantesBusqueda(w).some(v => textos.some(t => t.includes(v))));
+}
+
+// ── ESCAPE HTML (compartido con oc.js/dashboard.js/conteo.js/contabilidad.js) ──
+// escapeHtml: para TEXTO y atributos HTML normales. Evita XSS al interpolar
+// datos de la BD o del usuario en innerHTML.
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// escapeJsAttr: para argumentos de cadena DENTRO de atributos onclick="f('...')".
+// Primero escapa la cadena JS (barra invertida, comilla simple, saltos de línea)
+// y después el atributo HTML (el navegador decodifica entidades ANTES de que JS
+// parsee el atributo, así que ambos niveles deben quedar seguros).
+function escapeJsAttr(s) {
+  return String(s == null ? '' : s)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 // ── AUTENTICACIÓN ────────────────────────────────────────────────────
 
 function getToken() { return localStorage.getItem('inv_token'); }
@@ -55,26 +120,16 @@ window.doLogin = async function() {
     const resp = await data.json();
 
     if(resp.requires_2fa) {
-      // Mostrar pantalla 2FA
+      // Mostrar pantalla 2FA (passkey y/o TOTP según los métodos del usuario)
       localStorage.setItem('inv_temp_token', resp.temp_token);
       localStorage.setItem('inv_temp_user', resp.username);
       document.getElementById('page-login').style.display = 'none';
       document.getElementById('page-2fa').style.display = 'flex';
-      setTimeout(() => {
-        const inp = document.getElementById('login-2fa-code');
-        if(inp) {
-          inp.focus();
-          inp.select(); // Seleccionar texto previo si existe
-        }
-      }, 100);
+      prepararPantalla2FA(resp.metodos_2fa || ['totp']);
       return;
     }
 
-    localStorage.setItem('inv_token', resp.access_token);
-    localStorage.setItem('inv_rol', resp.rol);
-    localStorage.setItem('inv_user', resp.username);
-    localStorage.setItem('inv_nombre', resp.nombre || resp.username);
-    localStorage.setItem('inv_user_id', resp.id || '');
+    guardarSesion(resp);
     showApp(resp.rol, resp.username);
   } catch(e) {
     errBox.textContent = e.message;
@@ -103,15 +158,7 @@ window.doVerify2FA = async function() {
         throw new Error(e.detail || e.error || 'Código incorrecto');
     }
     const resp = await r.json();
-    localStorage.removeItem('inv_temp_token');
-    localStorage.removeItem('inv_temp_user');
-    
-    localStorage.setItem('inv_token', resp.access_token);
-    localStorage.setItem('inv_rol', resp.rol);
-    localStorage.setItem('inv_user', resp.username);
-    localStorage.setItem('inv_nombre', resp.nombre || resp.username);
-    localStorage.setItem('inv_user_id', resp.id || '');
-    
+    guardarSesion(resp);
     document.getElementById('page-2fa').style.display = 'none';
     showApp(resp.rol, resp.username);
   } catch(e) {
@@ -125,6 +172,163 @@ window.cancel2FA = function() {
   localStorage.removeItem('inv_temp_user');
   document.getElementById('page-2fa').style.display = 'none';
   document.getElementById('page-login').style.display = 'flex';
+};
+
+// ── PASSKEYS (WEBAUTHN) EN EL LOGIN ──────────────────────────────────
+
+// ¿Este navegador/contexto puede usar WebAuthn? Requiere contexto seguro:
+// https o localhost. Por IP pelada en la LAN el navegador lo bloquea.
+function passkeysDisponibles() {
+  return !!(window.isSecureContext && window.PublicKeyCredential && navigator.credentials);
+}
+
+// base64url (sin relleno) -> ArrayBuffer, para retos e IDs que van al navegador
+function b64urlToBuf(s) {
+  const b64 = String(s || '').replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64 + '='.repeat((4 - b64.length % 4) % 4));
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf.buffer;
+}
+
+// ArrayBuffer -> base64url (sin relleno), para respuestas que van a la API
+function bufToB64url(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Convierte una PublicKeyCredential a JSON plano (formato que espera py_webauthn)
+function credToJSON(cred) {
+  const r = cred.response;
+  const json = {
+    id: cred.id,
+    rawId: bufToB64url(cred.rawId),
+    type: cred.type,
+    clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+  };
+  if (r.attestationObject) {           // registro (create)
+    json.response = {
+      attestationObject: bufToB64url(r.attestationObject),
+      clientDataJSON: bufToB64url(r.clientDataJSON),
+    };
+    const t = r.getTransports ? r.getTransports() : [];
+    if (t && t.length) json.response.transports = t;
+  } else {                             // autenticación (get)
+    json.response = {
+      authenticatorData: bufToB64url(r.authenticatorData),
+      clientDataJSON: bufToB64url(r.clientDataJSON),
+      signature: bufToB64url(r.signature),
+      userHandle: r.userHandle ? bufToB64url(r.userHandle) : null,
+    };
+  }
+  return json;
+}
+
+// Guarda la sesión autenticada (mismo esquema en login directo, TOTP y passkey)
+function guardarSesion(resp) {
+  localStorage.setItem('inv_token', resp.access_token);
+  localStorage.setItem('inv_rol', resp.rol);
+  localStorage.setItem('inv_user', resp.username);
+  localStorage.setItem('inv_nombre', resp.nombre || resp.username);
+  localStorage.setItem('inv_user_id', resp.id || '');
+  localStorage.removeItem('inv_temp_token');
+  localStorage.removeItem('inv_temp_user');
+}
+
+// Ajusta la pantalla 2FA a los métodos del usuario: passkey, TOTP o ambos
+function prepararPantalla2FA(metodos) {
+  const passkeyOk = metodos.includes('passkey') && passkeysDisponibles();
+  const totpOk = metodos.includes('totp');
+  const blockPasskey = document.getElementById('2fa-passkey-block');
+  const blockTotp = document.getElementById('2fa-totp-block');
+  const divider = document.getElementById('2fa-divider');
+  const sub = document.getElementById('2fa-sub');
+  const errBox = document.getElementById('2fa-error');
+
+  if (blockPasskey) blockPasskey.style.display = passkeyOk ? '' : 'none';
+  if (blockTotp) blockTotp.style.display = totpOk ? '' : 'none';
+  if (divider) divider.style.display = (passkeyOk && totpOk) ? '' : 'none';
+  if (sub) {
+    sub.textContent = (passkeyOk && totpOk)
+      ? 'Elige cómo verificar tu identidad en este dispositivo.'
+      : (passkeyOk ? 'Verifica con la huella o el PIN de este dispositivo.'
+                   : 'Ingresa el código de tu aplicación autenticadora.');
+  }
+  if (errBox) {
+    // Caso límite: solo passkeys, pero este navegador no las soporta (p. ej. IP en LAN)
+    if (!passkeyOk && !totpOk) {
+      errBox.textContent = '🔒 Este navegador no puede usar passkeys aquí (necesita HTTPS o localhost). Abre la app desde un dispositivo compatible o pide al administrador un código TOTP.';
+      errBox.style.display = 'block';
+    } else {
+      errBox.style.display = 'none';
+    }
+  }
+  setTimeout(() => {
+    if (totpOk) {
+      const inp = document.getElementById('login-2fa-code');
+      if (inp) { inp.focus(); inp.select(); }
+    } else if (passkeyOk) {
+      const pb = document.getElementById('btn-2fa-passkey');
+      if (pb) pb.focus();
+    }
+  }, 100);
+}
+
+// Botón «Usar huella / PIN»: segundo factor con passkey (navigator.credentials.get)
+window.doVerifyPasskey = async function() {
+  const errBox = document.getElementById('2fa-error');
+  const btn = document.getElementById('btn-2fa-passkey');
+  errBox.style.display = 'none';
+  const tempToken = localStorage.getItem('inv_temp_token');
+  if (!tempToken) {
+    errBox.textContent = '⏰ La verificación expiró. Regresa e inicia sesión de nuevo.';
+    errBox.style.display = 'block';
+    return;
+  }
+  const original = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Esperando al dispositivo…'; }
+  try {
+    const opts = await fetch(API + '/auth/webauthn/login/options', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({temp_token: tempToken})
+    });
+    if (!opts.ok) {
+      const e = await opts.json().catch(()=>({detail:'No se pudo iniciar la verificación'}));
+      throw new Error(e.detail || 'No se pudo iniciar la verificación');
+    }
+    const publicKey = await opts.json();
+    publicKey.challenge = b64urlToBuf(publicKey.challenge);
+    if (publicKey.allowCredentials) {
+      publicKey.allowCredentials = publicKey.allowCredentials.map(c => ({...c, id: b64urlToBuf(c.id)}));
+    }
+    const cred = await navigator.credentials.get({publicKey});
+    const r = await fetch(API + '/auth/webauthn/login/verify', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({temp_token: tempToken, credential: credToJSON(cred)})
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(()=>({detail:'Verificación fallida'}));
+      throw new Error(e.detail || 'Verificación fallida');
+    }
+    const resp = await r.json();
+    guardarSesion(resp);
+    document.getElementById('page-2fa').style.display = 'none';
+    showApp(resp.rol, resp.username);
+  } catch(e) {
+    // NotAllowedError = el usuario canceló la ventana o el dispositivo no respondió
+    if (e && e.name === 'NotAllowedError') {
+      errBox.textContent = '❌ Cancelaste la verificación o el dispositivo no respondió. Puedes intentarlo de nuevo.';
+    } else {
+      errBox.textContent = e.message || 'No se pudo verificar la passkey.';
+    }
+    errBox.style.display = 'block';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = original; }
+  }
 };
 
 window.doLogout = function() {
@@ -177,21 +381,22 @@ function showApp(rol, username) {
   document.getElementById('app-header').style.display = '';
   document.getElementById('app-nav').style.display = '';
 
-  // Mostrar badge de sesión
+  // Mostrar nombre de sesión en la barra lateral
   const nombreUI = getSessionNombre();
-  const badge = document.getElementById('session-badge');
   const sideName = document.getElementById('sidebar-name');
   const sideRole = document.getElementById('sidebar-role');
   const sideAvatar = document.getElementById('sidebar-avatar');
   
-  const nombreMostrado = nombreUI || username;
   const primerNombre = nombreUI ? nombreUI.trim().split(' ')[0] : username;
   const rolLabels = { admin: '🔑 Admin', vendedor: '💰 Vendedor', bodeguero: '📦 Bodeguero' };
   
-  if(badge) badge.textContent = `${primerNombre} · ${rolLabels[rol] || rol}`;
   if(sideName) sideName.textContent = primerNombre;
   if(sideRole) sideRole.textContent = rolLabels[rol] || rol;
   if(sideAvatar) sideAvatar.textContent = primerNombre.charAt(0).toUpperCase();
+
+  // Botón de gestión de passkeys: solo si el navegador puede usarlas aquí
+  const btnPasskey = document.getElementById('btn-passkey-manage');
+  if (btnPasskey) btnPasskey.style.display = passkeysDisponibles() ? '' : 'none';
 
   applyRoleUI(rol);
   showPage('dashboard', document.querySelector('#app-nav button'));
@@ -211,7 +416,7 @@ function toast(msg, ok=true){
   const t = document.createElement('div');
   t.className = 'toast-item ' + (ok ? 'toast-ok' : 'toast-err');
   t.innerHTML = `
-    <div>${(ok?'✅ ':'❌ ') + msg}</div>
+    <div>${(ok?'✅ ':'❌ ') + escapeHtml(msg)}</div>
     <button class="toast-close" onclick="this.parentElement.remove()" title="Cerrar">✖</button>
   `;
   container.appendChild(t);
@@ -279,7 +484,7 @@ function updateFilterSubcats() {
     container.innerHTML = '<strong style="display:block;margin-bottom:5px;font-size:0.75rem;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">Subcategorías</strong>' +
       [...subcats].sort().map(s => `
         <label class="subcat-item">
-          <input type="checkbox" value="${s}" onchange="renderInventario()"> ${s}
+          <input type="checkbox" value="${escapeHtml(s)}" onchange="renderInventario()"> ${escapeHtml(s)}
         </label>
       `).join('');
   }
@@ -355,11 +560,11 @@ function extractColorSize(namePart) {
 
 function renderBreadcrumb(name, cat) {
   if (!cat || !cat.includes(' › ')) {
-     return `<div class="breadcrumb-container"><span class="bc-item bc-0">${name}</span></div>`;
+     return `<div class="breadcrumb-container"><span class="bc-item bc-0">${escapeHtml(name)}</span></div>`;
   }
   const levels = cat.split(' › ');
   const parts = [];
-  levels.forEach((l, i) => { parts.push(`<span class="bc-item bc-${Math.min(i, 4)}">${l}</span>`); });
+  levels.forEach((l, i) => { parts.push(`<span class="bc-item bc-${Math.min(i, 4)}">${escapeHtml(l)}</span>`); });
   let variantPart = name;
   levels.forEach(l => { variantPart = variantPart.replace(l, '').trim(); });
   variantPart = variantPart.replace(/^[-\s▸>]+/, '').trim();
@@ -367,18 +572,18 @@ function renderBreadcrumb(name, cat) {
     if (variantPart.includes('>')) {
       const segs = variantPart.split('>').map(s => s.trim()).filter(Boolean);
       const cssClasses = ['bc-peso', 'bc-color', 'bc-talla'];
-      segs.forEach((seg, idx) => { const cls = cssClasses[idx] || 'bc-v'; parts.push(`<span class="bc-item ${cls}">${seg}</span>`); });
+      segs.forEach((seg, idx) => { const cls = cssClasses[idx] || 'bc-v'; parts.push(`<span class="bc-item ${cls}">${escapeHtml(seg)}</span>`); });
     } else {
       const partsArr = variantPart.split(' - ').map(s=>s.trim());
       if (partsArr.length === 2) {
-         parts.push(`<span class="bc-item bc-peso">${partsArr[0]}</span>`);
+         parts.push(`<span class="bc-item bc-peso">${escapeHtml(partsArr[0])}</span>`);
          const res = extractColorSize(partsArr[1]);
-         if (res.color) parts.push(`<span class="bc-item bc-color">${res.color}</span>`);
-         if (res.size) parts.push(`<span class="bc-item bc-talla">${res.size}</span>`);
+         if (res.color) parts.push(`<span class="bc-item bc-color">${escapeHtml(res.color)}</span>`);
+         if (res.size) parts.push(`<span class="bc-item bc-talla">${escapeHtml(res.size)}</span>`);
       } else {
          const res = extractColorSize(variantPart);
-         if (res.color) parts.push(`<span class="bc-item bc-color">${res.color}</span>`);
-         if (res.size) parts.push(`<span class="bc-item bc-talla">${res.size}</span>`);
+         if (res.color) parts.push(`<span class="bc-item bc-color">${escapeHtml(res.color)}</span>`);
+         if (res.size) parts.push(`<span class="bc-item bc-talla">${escapeHtml(res.size)}</span>`);
       }
     }
   }
@@ -394,10 +599,7 @@ function renderInventario(){
   const maxQty=parseInt(document.getElementById('filter-qty-max').value);
   const checkedSubcats = [...document.querySelectorAll('#filter-subcats-container input:checked')].map(i=>i.value);
   let filtered=productos.filter(p=>{
-    const ms = p.nombre.toLowerCase().includes(search) || 
-               (p.sku || '').toLowerCase().includes(search) ||
-               (p.notas_internas || '').toLowerCase().includes(search) ||
-               (p.proveedores_alternativos || '').toLowerCase().includes(search);
+    const ms = coincideBusqueda([p.nombre, p.sku, p.notas_internas, p.proveedores_alternativos], search);
     if(!ms) return false;
     if(parent && !p.categoria.startsWith(parent)) return false;
     if(checkedSubcats.length > 0) {
@@ -454,15 +656,15 @@ function renderInventario(){
       tr.innerHTML = `
         <td>
           <div class="indent-content">
-            <span class="toggle-btn ${isCollapsed ? 'collapsed' : ''}" onclick="toggleGroup('${key.replace(/'/g, "\\'")}')">
+            <span class="toggle-btn ${isCollapsed ? 'collapsed' : ''}" onclick="toggleGroup('${escapeJsAttr(key)}')">
               ${isCollapsed ? '▶' : '▼'}
             </span>
-            <div class="parent-name" onclick="toggleGroup('${key.replace(/'/g, "\\'")}')" style="cursor:pointer">
+            <div class="parent-name" onclick="toggleGroup('${escapeJsAttr(key)}')" style="cursor:pointer">
               ${renderBreadcrumb(g.baseName, g.categoria)}
             </div>
           </div>
         </td>
-        <td>${g.categoria}</td>
+        <td>${escapeHtml(g.categoria)}</td>
         <td><span class="chip">${Object.keys(g.colors).length} colores</span></td>
         <td>
           <span class="aggregate-qty">${g.totalQty}</span>
@@ -473,7 +675,7 @@ function renderInventario(){
         <td><span class="aggregate-venta" title="Total vendido históricamente">${mxn(g.totalVendido)}</span></td>
         <td>${statusBadge(g.totalQty, g.minStock)}</td>
         <td>
-          <button class="btn btn-sm btn-success" style="font-size:0.78rem; padding:3px 8px; white-space:nowrap;" onclick="abrirModalVariante('${g.baseName.replace(/'/g, "\\'")}', '${g.categoria.replace(/'/g, "\\'").replace(/›/g, "›")}', 'color')" title="Agregar nuevo color a este producto">🎨 + Color</button>
+          <button class="btn btn-sm btn-success" style="font-size:0.78rem; padding:3px 8px; white-space:nowrap;" onclick="abrirModalVariante('${escapeJsAttr(g.baseName)}', '${escapeJsAttr(g.categoria)}', 'color')" title="Agregar nuevo color a este producto">🎨 + Color</button>
         </td>
       `;
       tbody.appendChild(tr);
@@ -495,10 +697,10 @@ function renderInventario(){
             const cgVendido = cg.items.reduce((a, x) => a + (window.globalSalesMap[x.nombre] || 0), 0);
             trColor.innerHTML = `
               <td style="padding-left: 30px;">
-                <span class="toggle-btn ${isColorCollapsed ? 'collapsed' : ''}" onclick="toggleGroup('${colorKey.replace(/'/g, "\\'")}')">
+                <span class="toggle-btn ${isColorCollapsed ? 'collapsed' : ''}" onclick="toggleGroup('${escapeJsAttr(colorKey)}')">
                   ${isColorCollapsed ? '▶' : '▼'}
                 </span>
-                <span class="bc-item bc-color" style="cursor:pointer" onclick="toggleGroup('${colorKey.replace(/'/g, "\\'")}')\">${colorName}</span>
+                <span class="bc-item bc-color" style="cursor:pointer" onclick="toggleGroup('${escapeJsAttr(colorKey)}')">${escapeHtml(colorName)}</span>
               </td>
               <td>—</td>
               <td><span style="font-size:0.8rem; color:#888;">${cg.items.length} tallas</span></td>
@@ -506,7 +708,7 @@ function renderInventario(){
               <td class="aggregate-cost" title="Costo stock este color">${mxn(cgCosto)}</td>
               <td class="aggregate-venta" title="Vendido este color">${mxn(cgVendido)}</td>
               <td>—</td><td>
-                <button class="btn btn-sm btn-info" style="font-size:0.78rem; padding:3px 8px; white-space:nowrap; color:white;" onclick="abrirModalVariante('${key.split('||')[0].replace(/'/g, "\\'")}', '${g.categoria.replace(/'/g, "\\'").replace(/›/g, "›")}', 'talla', '${colorName.replace(/'/g, "\\'")}')">📐 + Talla</button>
+                <button class="btn btn-sm btn-info" style="font-size:0.78rem; padding:3px 8px; white-space:nowrap; color:white;" onclick="abrirModalVariante('${escapeJsAttr(key.split('||')[0])}', '${escapeJsAttr(g.categoria)}', 'talla', '${escapeJsAttr(colorName)}')">📐 + Talla</button>
               </td>
             `;
             tbody.appendChild(trColor);
@@ -525,13 +727,13 @@ function renderInventario(){
               trChild.innerHTML = `
                 <td style="padding-left: 50px;">
                   ${renderBreadcrumb(p.nombre, p.categoria)}
-                  ${p.sku ? `<small style="color:#aaa; display:block; margin-left:15px; margin-top:2px;">SKU: ${p.sku}</small>` : ''}
+                  ${p.sku ? `<small style="color:#aaa; display:block; margin-left:15px; margin-top:2px;">SKU: ${escapeHtml(p.sku)}</small>` : ''}
                   <div class="product-info-extra">
-                    ${p.proveedores_alternativos ? `<span class="extra-supplier" title="Proveedores Alternativos: ${p.proveedores_alternativos.replace(/"/g, '&quot;') }">🏭 ${p.proveedores_alternativos}</span>` : ''}
-                    ${p.notas_internas ? `<span class="extra-notes" title="Notas Internas: ${p.notas_internas.replace(/"/g, '&quot;') }">📝 Ver notas</span>` : ''}
+                    ${p.proveedores_alternativos ? `<span class="extra-supplier" title="Proveedores Alternativos: ${escapeHtml(p.proveedores_alternativos)}">🏭 ${escapeHtml(p.proveedores_alternativos)}</span>` : ''}
+                    ${p.notas_internas ? `<span class="extra-notes" title="Notas Internas: ${escapeHtml(p.notas_internas)}">📝 Ver notas</span>` : ''}
                   </div>
                 </td>
-                <td>${p.categoria}</td>
+                <td>${escapeHtml(p.categoria)}</td>
                 <td>—</td>
                 <td><div class="qty-controls">
                   <button onclick="quickQty(${p.id},-1)">−</button>
@@ -543,7 +745,7 @@ function renderInventario(){
                 <td>
                   <button class="btn btn-sm btn-outline" style="border-color:#e2e8f0; color:#475569; margin-right:4px;" onclick="imprimirEtiqueta(${p.id})" title="Imprimir Código de Barras">🏷️</button>
                   <button class="btn btn-sm btn-primary" onclick="editProducto(${p.id})">✏️</button>
-                  <button class="btn btn-sm btn-info" style="color:white" onclick="verHistorialPrecios(${p.id}, '${p.nombre.replace(/'/g, "\\'")}')" title="Ver Historial de Precios">🕒</button>
+                  <button class="btn btn-sm btn-info" style="color:white" onclick="verHistorialPrecios(${p.id}, '${escapeJsAttr(p.nombre)}')" title="Ver Historial de Precios">🕒</button>
                   <button class="btn btn-sm btn-warning" onclick="openAjuste(${p.id})" title="Ajuste">📥</button>
                   <button class="btn btn-sm btn-danger" onclick="deleteProducto(${p.id})">🗑️</button>
                 </td>
@@ -645,8 +847,8 @@ function closeModal(type){ document.getElementById('overlay-'+type).classList.re
 function addVariantField(val='', sku=''){
   const div=document.createElement('div');div.className='variant-row';
   div.innerHTML=`
-    <input type="text" placeholder="Ej: M - Rojo" value="${val}" style="flex:2"/>
-    <input type="text" placeholder="SKU" value="${sku}" style="flex:1"/>
+    <input type="text" placeholder="Ej: M - Rojo" value="${escapeHtml(val)}" style="flex:2"/>
+    <input type="text" placeholder="SKU" value="${escapeHtml(sku)}" style="flex:1"/>
     <button onclick="this.parentNode.remove()">×</button>
   `;
   document.getElementById('variants-list').appendChild(div);
@@ -813,8 +1015,8 @@ window.onFiltrarCategoria = function() {
    const oldVal = sel.value;
    sel.innerHTML = '<option value="">-- Selecciona --</option>';
    let matches = productos;
-   if(text) matches = matches.filter(p => p.nombre.toLowerCase().includes(text) || p.categoria.toLowerCase().includes(text));
-   if(skuText) matches = matches.filter(p => (p.sku||'').toLowerCase().includes(skuText));
+   if(text) matches = matches.filter(p => coincideBusqueda([p.nombre, p.categoria], text));
+   if(skuText) matches = matches.filter(p => coincideBusqueda([p.sku], skuText));
    matches.forEach(p => {
        const o=document.createElement('option');
        o.value=p.id;
@@ -938,7 +1140,7 @@ window.renderCarritoUI = function() {
     div.style.borderBottom = '1px dashed #eee';
     div.innerHTML = `
       <div style="flex:1">
-         <div style="font-size:0.9rem; font-weight:600">${c.nombre} <small>(${c.sku})</small></div>
+         <div style="font-size:0.9rem; font-weight:600">${escapeHtml(c.nombre)} <small>(${escapeHtml(c.sku)})</small></div>
          <div style="font-size:0.8rem; color:#666">${c.qty}x ${mxn(c.precio)} = <strong>${mxn(c.qty*c.precio)}</strong></div>
       </div>
       <button class="btn btn-sm btn-outline" style="padding: 2px 6px; border-color: red; color: red;" onclick="eliminarDelCarrito(${i})">🗑️</button>
@@ -960,7 +1162,7 @@ window.renderCarritoUI = function() {
     
     cuponDiv.style.display = 'flex';
     cuponDiv.innerHTML = `
-      <span>🏷️ Cupón: <strong>${window.cuponAplicado.codigo}</strong> (-${mxn(descVal)})</span>
+      <span>🏷️ Cupón: <strong>${escapeHtml(window.cuponAplicado.codigo)}</strong> (-${mxn(descVal)})</span>
       <span class="remove-cupon" onclick="removerCupon()" title="Remover cupón">×</span>
     `;
   } else {
@@ -1067,7 +1269,7 @@ async function renderHistorial(){
   const query = `/movimientos?skip=${skipMovimientos}&limit=${limitMovimientos}` + (tipo ? `&tipo=${tipo}` : '');
   try{
     let items=await req('GET', query);
-    if(search) items=items.filter(h=>h.producto_nombre.toLowerCase().includes(search)||(h.notas||'').toLowerCase().includes(search));
+    if(search) items=items.filter(h=>coincideBusqueda([h.producto_nombre, h.notas], search));
     const ticketsG = {}; const finalItems = [];
     items.forEach(h=>{
        if (h.tipo === 'venta' && h.notas && h.notas.startsWith('TICKET-')) {
@@ -1090,12 +1292,12 @@ async function renderHistorial(){
       let p_val = h.isGroup ? mxn(h.totalPrecio) : (h.precio>0?mxn(h.precio*h.qty):'');
       let t_btn = '';
       if (h.tipo === 'venta') {
-         if (h.isGroup) { t_btn = `<button class="btn btn-sm btn-outline" style="margin-top:5px; font-size:0.7rem; padding: 3px 6px;" onclick="descargarTicketMulti('${encodeURIComponent(JSON.stringify(h))}')">📄 Ticket Múltiple</button>`; }
-         else { h.detalles = [{ producto_nombre: h.producto_nombre, sku: (productos.find(x=>x.id===h.producto_id)||{}).sku, qty: h.qty, precio: h.precio, variante: h.variante }]; t_btn = `<button class="btn btn-sm btn-outline" style="margin-top:5px; font-size:0.7rem; padding: 3px 6px;" onclick="descargarTicketMulti('${encodeURIComponent(JSON.stringify(h))}')">📄 Ticket</button>`; }
+         if (h.isGroup) { t_btn = `<button class="btn btn-sm btn-outline" style="margin-top:5px; font-size:0.7rem; padding: 3px 6px;" onclick="descargarTicketMulti('${escapeJsAttr(encodeURIComponent(JSON.stringify(h)))}')">📄 Ticket Múltiple</button>`; }
+         else { h.detalles = [{ producto_nombre: h.producto_nombre, sku: (productos.find(x=>x.id===h.producto_id)||{}).sku, qty: h.qty, precio: h.precio, variante: h.variante }]; t_btn = `<button class="btn btn-sm btn-outline" style="margin-top:5px; font-size:0.7rem; padding: 3px 6px;" onclick="descargarTicketMulti('${escapeJsAttr(encodeURIComponent(JSON.stringify(h)))}')">📄 Ticket</button>`; }
       }
       div.innerHTML=`<div class="hist-icon">${icon}</div>
-        <div class="hist-info"><strong>${p_name}</strong>
-        <small>${h.canal}${h.notas?' · '+h.notas:''}</small></div>
+        <div class="hist-info"><strong>${escapeHtml(p_name)}</strong>
+        <small>${escapeHtml(h.canal)}${h.notas?' · '+escapeHtml(h.notas):''}</small></div>
         <div class="hist-meta"><span class="badge ${badge}">${label}</span><br>
         <span style="font-weight:600">${h.tipo==='venta'?'-':'+'}${h.isGroup ? '' : h.qty + ' unidades'}</span><br>
         ${p_val}<br>
@@ -1125,7 +1327,7 @@ async function renderReporte(){
     const tbody=document.getElementById('r-body');tbody.innerHTML='';
     if(r.top_productos.length===0){document.getElementById('r-empty').style.display='block';document.getElementById('r-table').style.display='none';return;}
     document.getElementById('r-empty').style.display='none';document.getElementById('r-table').style.display='';
-    r.top_productos.forEach(p=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td><strong>${p.nombre}</strong></td><td>${p.qty}</td><td>${mxn(p.ingresos)}</td><td style="color:#16a34a;font-weight:600">${mxn(p.ingresos-p.costo)}</td>`; tbody.appendChild(tr); });
+    r.top_productos.forEach(p=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td><strong>${escapeHtml(p.nombre)}</strong></td><td>${p.qty}</td><td>${mxn(p.ingresos)}</td><td style="color:#16a34a;font-weight:600">${mxn(p.ingresos-p.costo)}</td>`; tbody.appendChild(tr); });
   }catch(e){toast(e.message,false);}
 }
 
@@ -1650,12 +1852,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     gsInput.addEventListener('input', (e) => renderGsResults(e.target.value.toLowerCase()));
   }
 
-  window.closeLowStockAlert = () => {
-    const alertEl = document.getElementById('low-stock-alert');
-    if(alertEl) alertEl.style.display = 'none';
-    window.lowStockAlertDismissed = true;
-  };
-
   // Inicializar Reloj CDMX
   const clockEl = document.getElementById('dash-clock');
   if (clockEl) {
@@ -1729,7 +1925,7 @@ async function renderVentasRecientes() {
       let d_html = '<div style="margin-top:8px; margin-bottom:8px; font-size:0.75rem; color:#475569; line-height:1.5;">';
       v.detalles.forEach(d => {
          d_html += `<div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-            <span style="font-weight:600; color:${titleColor};">${d.qty}x</span> ${d.producto_nombre} ${d.variante ? `(${d.variante})` : ''}
+            <span style="font-weight:600; color:${titleColor};">${d.qty}x</span> ${escapeHtml(d.producto_nombre)} ${d.variante ? `(${escapeHtml(d.variante)})` : ''}
          </div>`;
       });
       d_html += `</div>`;
@@ -1740,14 +1936,14 @@ async function renderVentasRecientes() {
       
       div.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:center;">
-           <div style="font-weight:bold; color:${titleColor}; font-size:0.8rem; font-family:monospace;">📦 ${displayFolio}</div>
+           <div style="font-weight:bold; color:${titleColor}; font-size:0.8rem; font-family:monospace;">📦 ${escapeHtml(displayFolio)}</div>
         </div>
-        <div style="font-size:0.65rem; color:#64748b; margin-top:2px;">${dateStr} ${v.canal ? `· ${v.canal}` : ''}</div>
+        <div style="font-size:0.65rem; color:#64748b; margin-top:2px;">${dateStr} ${v.canal ? `· ${escapeHtml(v.canal)}` : ''}</div>
         ${d_html}
         <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid ${borderColor}; padding-top:8px;">
            <div style="font-weight:bold; color:#1e293b; font-size:0.9rem;">Total: ${mxn(v.totalPrecio)}</div>
            <div style="display:flex; gap: 5px;">
-             <button class="btn btn-sm btn-outline" style="color:#0ea5e9; border-color:#0ea5e9; background:white; font-size:0.7rem; padding:4px 8px;" onclick="descargarTicketReciente('${v.folio}')" title="Descargar Ticket PDF">📥 Ticket</button>
+             <button class="btn btn-sm btn-outline" style="color:#0ea5e9; border-color:#0ea5e9; background:white; font-size:0.7rem; padding:4px 8px;" onclick="descargarTicketReciente('${escapeJsAttr(v.folio)}')" title="Descargar Ticket PDF">📥 Ticket</button>
              <button class="btn btn-sm btn-outline" style="color:#ef4444; border-color:#ef4444; background:white; font-size:0.7rem; padding:4px 8px;" onclick="cancelarVenta([${v.ids.join(',')}])" title="Cancelar Venta Completa">🗑️ Eliminar</button>
            </div>
         </div>
@@ -1934,20 +2130,20 @@ function renderVentasAgrupadasTable(sales) {
     tr.style.borderBottom = '1px solid #f1f5f9';
     
     tr.innerHTML = `
-      <td style="padding:12px; text-align:center;" onclick="toggleVentaDetails('${v.folio}')">
+      <td style="padding:12px; text-align:center;" onclick="toggleVentaDetails('${escapeJsAttr(v.folio)}')">
         <span class="gv-expand-chevron">▶</span>
       </td>
-      <td style="padding:12px; font-family:monospace; font-weight:600;" onclick="toggleVentaDetails('${v.folio}')">${v.folio}</td>
-      <td style="padding:12px;" onclick="toggleVentaDetails('${v.folio}')">${dateStr}</td>
-      <td style="padding:12px;" onclick="toggleVentaDetails('${v.folio}')">
-        <span class="channel-badge ${channelClass}">${cleanChannel}</span>
+      <td style="padding:12px; font-family:monospace; font-weight:600;" onclick="toggleVentaDetails('${escapeJsAttr(v.folio)}')">${escapeHtml(v.folio)}</td>
+      <td style="padding:12px;" onclick="toggleVentaDetails('${escapeJsAttr(v.folio)}')">${dateStr}</td>
+      <td style="padding:12px;" onclick="toggleVentaDetails('${escapeJsAttr(v.folio)}')">
+        <span class="channel-badge ${channelClass}">${escapeHtml(cleanChannel)}</span>
       </td>
-      <td style="padding:12px; text-align:center;" onclick="toggleVentaDetails('${v.folio}')">${v.total_items} uds</td>
-      <td style="padding:12px; text-align:right; font-weight:bold; color:#0f172a;" onclick="toggleVentaDetails('${v.folio}')">${mxn(v.total_estimado)}</td>
+      <td style="padding:12px; text-align:center;" onclick="toggleVentaDetails('${escapeJsAttr(v.folio)}')">${v.total_items} uds</td>
+      <td style="padding:12px; text-align:right; font-weight:bold; color:#0f172a;" onclick="toggleVentaDetails('${escapeJsAttr(v.folio)}')">${mxn(v.total_estimado)}</td>
       <td style="padding:12px; text-align:right; display:flex; gap:6px; justify-content:flex-end; align-items:center;">
-        <button class="btn btn-sm btn-outline" style="color:#0ea5e9; border-color:#0ea5e9; background:white; font-size:0.75rem; padding:4px 10px;" onclick="reimprimirTicketFolio('${v.folio}')">📥 Ticket</button>
-        <button class="btn btn-sm btn-outline" style="color:#f59e0b; border-color:#f59e0b; background:white; font-size:0.75rem; padding:4px 10px; ${isAdmin ? '' : 'display:none;'}" onclick="abrirModalDevolucion('${v.folio}')">↩️ Devolver</button>
-        <button class="btn btn-sm btn-outline" style="color:#ef4444; border-color:#ef4444; background:white; font-size:0.75rem; padding:4px 10px; ${isAdmin ? '' : 'display:none;'}" onclick="eliminarVentaCompleta('${v.folio}')">🗑️ Cancelar</button>
+        <button class="btn btn-sm btn-outline" style="color:#0ea5e9; border-color:#0ea5e9; background:white; font-size:0.75rem; padding:4px 10px;" onclick="reimprimirTicketFolio('${escapeJsAttr(v.folio)}')">📥 Ticket</button>
+        <button class="btn btn-sm btn-outline" style="color:#f59e0b; border-color:#f59e0b; background:white; font-size:0.75rem; padding:4px 10px; ${isAdmin ? '' : 'display:none;'}" onclick="abrirModalDevolucion('${escapeJsAttr(v.folio)}')">↩️ Devolver</button>
+        <button class="btn btn-sm btn-outline" style="color:#ef4444; border-color:#ef4444; background:white; font-size:0.75rem; padding:4px 10px; ${isAdmin ? '' : 'display:none;'}" onclick="eliminarVentaCompleta('${escapeJsAttr(v.folio)}')">🗑️ Cancelar</button>
       </td>
     `;
     tbody.appendChild(tr);
@@ -1960,9 +2156,9 @@ function renderVentasAgrupadasTable(sales) {
     v.detalles.forEach(d => {
       detailsHtml += `
         <tr>
-          <td style="padding:6px 12px; font-family:monospace; font-size:0.75rem;">${d.sku}</td>
-          <td style="padding:6px 12px; font-weight:600;">${d.producto_nombre}</td>
-          <td style="padding:6px 12px; color:#64748b;">${d.variante || '—'}</td>
+          <td style="padding:6px 12px; font-family:monospace; font-size:0.75rem;">${escapeHtml(d.sku)}</td>
+          <td style="padding:6px 12px; font-weight:600;">${escapeHtml(d.producto_nombre)}</td>
+          <td style="padding:6px 12px; color:#64748b;">${escapeHtml(d.variante) || '—'}</td>
           <td style="padding:6px 12px; text-align:center;">${d.qty} uds</td>
           <td style="padding:6px 12px; text-align:right;">${mxn(d.precio)}</td>
           <td style="padding:6px 12px; text-align:right; font-weight:bold;">${mxn(d.precio * d.qty)}</td>
@@ -2072,11 +2268,11 @@ window.abrirModalDevolucion = function(folio) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td style="padding:8px 12px; font-weight:600; font-size:0.8rem;">
-        ${d.producto_nombre} ${d.variante ? `<div style="font-size:0.7rem; color:#64748b; font-weight:normal;">${d.variante}</div>` : ''}
+        ${escapeHtml(d.producto_nombre)} ${d.variante ? `<div style="font-size:0.7rem; color:#64748b; font-weight:normal;">${escapeHtml(d.variante)}</div>` : ''}
       </td>
       <td style="padding:8px 12px; text-align:center; font-weight:bold; font-size:0.8rem;">${d.qty}</td>
       <td style="padding:8px 12px; text-align:center;">
-        <input type="number" class="devolucion-qty-input" data-mov-id="${d.movimiento_id}" min="0" max="${d.qty}" value="0" style="width:70px; text-align:center; padding:4px; font-size:0.8rem; border-radius:4px; border:1px solid #cbd5e1;">
+        <input type="number" class="devolucion-qty-input" data-mov-id="${escapeHtml(d.movimiento_id)}" min="0" max="${escapeHtml(d.qty)}" value="0" style="width:70px; text-align:center; padding:4px; font-size:0.8rem; border-radius:4px; border:1px solid #cbd5e1;">
       </td>
     `;
     tbody.appendChild(tr);
@@ -2259,10 +2455,8 @@ function renderGsResults(query) {
   }
 
   // Búsqueda inteligente
-  const matches = productos.filter(p => 
-    p.nombre.toLowerCase().includes(query) || 
-    (p.sku && p.sku.toLowerCase().includes(query)) ||
-    p.categoria.toLowerCase().includes(query)
+  const matches = productos.filter(p =>
+    coincideBusqueda([p.nombre, p.sku, p.categoria], query)
   ).slice(0, 15);
 
   if (matches.length === 0) {
@@ -2293,8 +2487,8 @@ function renderGsResults(query) {
     
     div.innerHTML = `
       <div>
-        <div class="gs-item-title">${p.nombre}</div>
-        <div class="gs-item-sub">SKU: ${p.sku || 'N/A'} &bull; Stock: ${p.qty}</div>
+        <div class="gs-item-title">${escapeHtml(p.nombre)}</div>
+        <div class="gs-item-sub">SKU: ${escapeHtml(p.sku || 'N/A')} &bull; Stock: ${p.qty}</div>
       </div>
       <div class="gs-item-badge">${actionBadge}</div>
     `;
@@ -2442,7 +2636,7 @@ const ACTION_META = {
 
 function getActionBadge(accion) {
   const meta = ACTION_META[accion] || { icon: '📝', label: accion, css: 'default' };
-  return `<span class="action-badge ${meta.css}">${meta.icon} ${meta.label}</span>`;
+  return `<span class="action-badge ${meta.css}">${meta.icon} ${escapeHtml(meta.label)}</span>`;
 }
 
 function formatDetalles(detalles) {
@@ -2452,7 +2646,7 @@ function formatDetalles(detalles) {
   return entries.map(([k, v]) => {
     const key = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
     const val = typeof v === 'object' ? JSON.stringify(v) : v;
-    return `<span class="log-detail-chip"><strong>${key}:</strong> ${val}</span>`;
+    return `<span class="log-detail-chip"><strong>${escapeHtml(key)}:</strong> ${escapeHtml(val)}</span>`;
   }).join(' ');
 }
 
@@ -2513,12 +2707,12 @@ window.renderAuditLogs = function(logs) {
       <td style="padding:10px 12px; font-size:0.82rem; color:#64748b; white-space:nowrap;">${fecha}</td>
       <td style="padding:10px 12px;">
         <span class="badge" style="background:#f1f5f9; color:#475569; font-size:0.78rem;">
-          ${log.username || 'Sistema'}
+          ${escapeHtml(log.username || 'Sistema')}
         </span>
       </td>
       <td style="padding:10px 12px;">${getActionBadge(log.accion)}</td>
       <td style="padding:10px 12px; color:#475569; font-size:0.85rem;">
-        ${log.recurso || '—'} ${log.recurso_id ? `<small style="color:#94a3b8;">#${log.recurso_id}</small>` : ''}
+        ${escapeHtml(log.recurso || '—')} ${log.recurso_id ? `<small style="color:#94a3b8;">#${escapeHtml(log.recurso_id)}</small>` : ''}
       </td>
       <td style="padding:10px 12px; max-width:300px; overflow:hidden;">${formatDetalles(log.detalles)}</td>
     `;
@@ -2652,18 +2846,18 @@ window.loadBackups = async function() {
     if (container) container.innerHTML = backups.map(b => `
       <div class="backup-card">
         <div class="backup-info">
-          <div class="backup-name">📁 ${b.nombre}</div>
-          <div class="backup-meta">📅 ${b.fecha} &nbsp;·&nbsp; 📊 ${b.tamano}</div>
+          <div class="backup-name">📁 ${escapeHtml(b.nombre)}</div>
+          <div class="backup-meta">📅 ${escapeHtml(b.fecha)} &nbsp;·&nbsp; 📊 ${escapeHtml(b.tamano)}</div>
         </div>
         <div class="backup-actions">
-          <button class="btn btn-sm btn-primary" onclick="downloadBackup('${b.nombre}')" title="Descargar">⬇ Descargar</button>
-          <button class="btn btn-sm btn-danger" onclick="restoreBackup('${b.nombre}')" title="Restaurar">♻️ Restaurar</button>
-          <button class="btn btn-sm btn-outline" onclick="deleteBackup('${b.nombre}')" title="Eliminar" style="color:#ef4444; border-color:#fca5a5;">🗑️</button>
+          <button class="btn btn-sm btn-primary" onclick="downloadBackup('${escapeJsAttr(b.nombre)}')" title="Descargar">⬇ Descargar</button>
+          <button class="btn btn-sm btn-danger" onclick="restoreBackup('${escapeJsAttr(b.nombre)}')" title="Restaurar">♻️ Restaurar</button>
+          <button class="btn btn-sm btn-outline" onclick="deleteBackup('${escapeJsAttr(b.nombre)}')" title="Eliminar" style="color:#ef4444; border-color:#fca5a5;">🗑️</button>
         </div>
       </div>
     `).join('');
   } catch(e) {
-    container.innerHTML = `<div style="color:red;">Error: ${e.message}</div>`;
+    container.innerHTML = `<div style="color:red;">Error: ${escapeHtml(e.message)}</div>`;
   }
 };
 
@@ -2758,19 +2952,19 @@ window.renderUsuarios = function(users) {
     const is2fa = u.totp_enabled ? '<span class="badge" style="background:#dcfce7; color:#166534;">SÍ</span>' : '<span class="badge" style="background:#f1f5f9; color:#64748b;">NO</span>';
     
     tr.innerHTML = `
-      <td style="padding:12px; color:#64748b; font-weight:500;">${u.nombre || '-'}</td>
-      <td style="padding:12px;"><strong>${u.username}</strong> ${isSelf ? '<span class="badge" style="background:#e0f2fe; color:#0369a1; font-size:0.7rem;">Tú</span>' : ''}</td>
-      <td style="padding:12px; color:#64748b; font-size:0.9rem;">${u.email || '-'}</td>
-      <td style="padding:12px;"><span class="badge" style="background:${u.rol === 'admin' ? '#f1f5f9' : '#fff'}; color:#475569; border:1px solid #e2e8f0;">${u.rol.toUpperCase()}</span></td>
+      <td style="padding:12px; color:#64748b; font-weight:500;">${escapeHtml(u.nombre) || '-'}</td>
+      <td style="padding:12px;"><strong>${escapeHtml(u.username)}</strong> ${isSelf ? '<span class="badge" style="background:#e0f2fe; color:#0369a1; font-size:0.7rem;">Tú</span>' : ''}</td>
+      <td style="padding:12px; color:#64748b; font-size:0.9rem;">${escapeHtml(u.email) || '-'}</td>
+      <td style="padding:12px;"><span class="badge" style="background:${u.rol === 'admin' ? '#f1f5f9' : '#fff'}; color:#475569; border:1px solid #e2e8f0;">${escapeHtml((u.rol || '').toUpperCase())}</span></td>
       <td style="padding:12px;">
         <span class="status-indicator ${u.activo ? 'status-active' : 'status-inactive'}"></span>
         ${u.activo ? 'Activo' : 'Inactivo'}
       </td>
       <td style="padding:12px; text-align:center;">${is2fa}</td>
       <td style="padding:12px;">
-        <button class="btn btn-sm btn-outline" onclick="openModalUsuario(${u.id}, '${u.username}', '${u.rol}', ${u.activo}, '${u.email || ''}', '${(u.nombre || '').replace(/'/g, "\\'")}')" title="Editar">✏️</button>
+        <button class="btn btn-sm btn-outline" onclick="openModalUsuario(${u.id}, '${escapeJsAttr(u.username)}', '${escapeJsAttr(u.rol)}', ${u.activo}, '${escapeJsAttr(u.email || '')}', '${escapeJsAttr(u.nombre || '')}')" title="Editar">✏️</button>
         ${!isSelf ? `
-          <button class="btn btn-sm btn-outline btn-danger" onclick="deleteUsuario(${u.id}, '${u.username}')" title="Eliminar" style="margin-left:5px;">🗑️</button>
+          <button class="btn btn-sm btn-outline btn-danger" onclick="deleteUsuario(${u.id}, '${escapeJsAttr(u.username)}')" title="Eliminar" style="margin-left:5px;">🗑️</button>
         ` : ''}
       </td>
     `;
@@ -2921,7 +3115,7 @@ window.renderNotificacionesList = function(list) {
 
   panelList.innerHTML = list.map(n => `
     <div class="notif-item ${n.leida ? 'leida' : 'unread'}" onclick="marcarUnaleida(${n.id})">
-      <span class="notif-msg">${n.mensaje}</span>
+      <span class="notif-msg">${escapeHtml(n.mensaje)}</span>
       <span class="notif-time">${new Date(n.fecha).toLocaleString('es-MX')}</span>
     </div>
   `).join('');
@@ -2991,9 +3185,8 @@ function renderDescuentos() {
   const tbody = document.getElementById('d-body');
   if (!tbody) return;
   
-  const filtered = descuentos.filter(d => 
-    d.codigo.toLowerCase().includes(search) || 
-    (d.barcode && d.barcode.toLowerCase().includes(search))
+  const filtered = descuentos.filter(d =>
+    coincideBusqueda([d.codigo, d.barcode], search)
   );
 
   tbody.innerHTML = '';
@@ -3006,14 +3199,14 @@ function renderDescuentos() {
   filtered.forEach(d => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td><strong>${d.codigo}</strong></td>
+      <td><strong>${escapeHtml(d.codigo)}</strong></td>
       <td>${d.tipo === 'porcentaje' ? 'Porcentaje' : 'Monto Fijo'}</td>
-      <td>${d.tipo === 'porcentaje' ? d.valor + '%' : mxn(d.valor)}</td>
+      <td>${d.tipo === 'porcentaje' ? escapeHtml(d.valor) + '%' : mxn(d.valor)}</td>
       <td>${d.min_items}</td>
       <td>
         <div style="display:flex; align-items:center; gap:8px;">
-          <small>${d.barcode || '—'}</small>
-          <button class="btn btn-sm btn-outline" onclick="descargarBarcode('${d.barcode || d.codigo}', '${d.codigo}')" title="Descargar Código de Barras" style="padding: 2px 5px; font-size: 0.8rem;">📥</button>
+          <small>${escapeHtml(d.barcode) || '—'}</small>
+          <button class="btn btn-sm btn-outline" onclick="descargarBarcode('${escapeJsAttr(d.barcode || d.codigo)}', '${escapeJsAttr(d.codigo)}')" title="Descargar Código de Barras" style="padding: 2px 5px; font-size: 0.8rem;">📥</button>
         </div>
       </td>
       <td><span class="badge ${d.activo ? 'badge-ok' : 'badge-out'}">${d.activo ? 'Activo' : 'Inactivo'}</span></td>
@@ -3150,6 +3343,123 @@ window.confirm2FASetup = async function() {
         alert("Código inválido: " + e.message);
     }
 }
+
+/**
+ * ── PASSKEYS (WEBAUTHN): GESTIÓN ─────────────────────────────────────
+ * Modal overlay-passkey-setup (index.html): lista, registra y elimina
+ * las passkeys del usuario en sesión. La llave privada nunca sale del
+ * dispositivo; el servidor solo guarda la llave pública.
+ */
+
+// Aviso dentro del modal de passkeys (verde éxito / rojo error)
+function passkeyMsg(texto, esError) {
+    const box = document.getElementById('passkey-msg');
+    if (!box) return;
+    box.textContent = texto;
+    box.style.display = 'block';
+    box.style.background = esError ? '#fef2f2' : '#f0fdf4';
+    box.style.color = esError ? '#b91c1c' : '#15803d';
+    box.style.border = esError ? '1px solid #fecaca' : '1px solid #bbf7d0';
+}
+
+// Nombre automático según sistema/navegador (el usuario puede escribir otro)
+function nombrePasskey() {
+    const ua = navigator.userAgent;
+    const so = /Windows/i.test(ua) ? 'Windows'
+        : /Android/i.test(ua) ? 'Android'
+        : /iPhone|iPad|iPod/i.test(ua) ? 'iOS'
+        : /Mac OS X/i.test(ua) ? 'Mac'
+        : /Linux/i.test(ua) ? 'Linux' : 'Dispositivo';
+    const nav = /Edg\//.test(ua) ? 'Edge'
+        : /OPR\//.test(ua) ? 'Opera'
+        : /Firefox\//.test(ua) ? 'Firefox'
+        : /Chrome\//.test(ua) ? 'Chrome'
+        : /Safari\//.test(ua) ? 'Safari' : 'Navegador';
+    return so + ' · ' + nav;
+}
+
+window.openPasskeySetup = function() {
+    if (!passkeysDisponibles()) {
+        alert('Este navegador no puede usar passkeys aquí (requiere HTTPS o localhost).');
+        return;
+    }
+    const box = document.getElementById('passkey-msg');
+    if (box) box.style.display = 'none';
+    openModal('passkey-setup');
+    loadPasskeys();
+};
+
+async function loadPasskeys() {
+    const lista = document.getElementById('passkey-list');
+    if (!lista) return;
+    lista.innerHTML = '<p style="padding:12px; color:#999; font-size:0.85rem;">Cargando…</p>';
+    try {
+        const creds = await req('GET', '/auth/webauthn/credenciales');
+        if (!creds.length) {
+            lista.innerHTML = '<p style="padding:12px; color:#999; font-size:0.85rem;">Aún no tienes passkeys registradas. La primera que registres será tu segundo factor en este dispositivo.</p>';
+            return;
+        }
+        lista.innerHTML = creds.map(c => {
+            const creado = c.creado ? new Date(c.creado).toLocaleDateString() : '—';
+            const ultimo = c.ultimo_uso ? new Date(c.ultimo_uso).toLocaleDateString() : 'sin uso';
+            return `
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid #f3f4f6;">
+                <div style="min-width:0;">
+                  <p style="margin:0; font-weight:600; font-size:0.9rem;">🔑 ${escapeHtml(c.nombre || 'Passkey')}</p>
+                  <p style="margin:2px 0 0; color:#9ca3af; font-size:0.75rem;">Creada: ${creado} · Último uso: ${ultimo}</p>
+                </div>
+                <button class="btn btn-sm btn-outline" style="color:#ef4444; border-color:#fca5a5; flex-shrink:0;" onclick="eliminarPasskey(${c.id})" title="Eliminar">Eliminar</button>
+              </div>`;
+        }).join('');
+    } catch(e) {
+        lista.innerHTML = '';
+        passkeyMsg('No se pudieron cargar tus passkeys: ' + e.message, true);
+    }
+}
+
+window.registrarPasskey = async function() {
+    const btn = document.getElementById('btn-passkey-add');
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Esperando al dispositivo…'; }
+    try {
+        const opts = await req('POST', '/auth/webauthn/register/options');
+        opts.challenge = b64urlToBuf(opts.challenge);
+        opts.user.id = b64urlToBuf(opts.user.id);
+        if (opts.excludeCredentials) {
+            opts.excludeCredentials = opts.excludeCredentials.map(c => ({...c, id: b64urlToBuf(c.id)}));
+        }
+        const cred = await navigator.credentials.create({publicKey: opts});
+        let nombre = (document.getElementById('passkey-name').value || '').trim();
+        if (!nombre) nombre = nombrePasskey();
+        await req('POST', '/auth/webauthn/register/verify', {credential: credToJSON(cred), nombre});
+        document.getElementById('passkey-name').value = '';
+        passkeyMsg('✅ Passkey registrada. Desde ahora podrás usarla como segundo factor.', false);
+        loadPasskeys();
+    } catch(e) {
+        if (e && e.name === 'NotAllowedError') {
+            passkeyMsg('❌ El registro fue cancelado o el dispositivo no respondió.', true);
+        } else if (e && e.name === 'InvalidStateError') {
+            passkeyMsg('Este dispositivo ya tiene registrada una passkey para la app.', true);
+        } else {
+            passkeyMsg('No se pudo registrar la passkey: ' + (e.message || 'error inesperado'), true);
+        }
+        console.error('registrarPasskey', e);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = original; }
+    }
+};
+
+window.eliminarPasskey = function(id) {
+    showConfirm('¿Eliminar esta passkey? Ya no podrás usarla como segundo factor en ese dispositivo.', async () => {
+        try {
+            await req('DELETE', '/auth/webauthn/credenciales/' + id);
+            passkeyMsg('Passkey eliminada.', false);
+            loadPasskeys();
+        } catch(e) {
+            passkeyMsg('No se pudo eliminar: ' + e.message, true);
+        }
+    });
+};
 
 // ── Sidebar Toggle Logic (Lumina Glass Layout) ──
 window.toggleSidebarCollapse = function() {

@@ -181,6 +181,7 @@ class TokenResponse(BaseModel):
     id: Optional[int] = None
     requires_2fa: bool = False
     temp_token: Optional[str] = None
+    metodos_2fa: Optional[List[str]] = None   # ["totp", "passkey"]
 
 
 class TOTPSetupResponse(BaseModel):
@@ -191,6 +192,33 @@ class TOTPSetupResponse(BaseModel):
 class TOTPVerifyRequest(BaseModel):
     code: str
     temp_token: Optional[str] = None
+
+
+# ── PASSKEYS (WEBAUTHN) ──────────────────────────────────────────────
+
+class WebAuthnRegisterVerifyRequest(BaseModel):
+    credential: dict                      # JSON completo de navigator.credentials.create()
+    nombre: Optional[str] = None
+
+
+class WebAuthnLoginOptionsRequest(BaseModel):
+    temp_token: Optional[str] = None
+
+
+class WebAuthnLoginVerifyRequest(BaseModel):
+    temp_token: Optional[str] = None
+    credential: dict                      # JSON completo de navigator.credentials.get()
+
+
+class WebAuthnCredentialOut(BaseModel):
+    id: int
+    nombre: str = ""
+    transports: str = ""
+    creado: Optional[datetime] = None
+    ultimo_uso: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 class UsuarioCreate(BaseModel):

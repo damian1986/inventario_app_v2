@@ -1,6 +1,23 @@
+import json
+import os
 import re
+import unicodedata
 from decimal import Decimal, ROUND_HALF_UP
 import pyotp
+from webauthn import (
+    generate_registration_options,
+    verify_registration_response,
+    generate_authentication_options,
+    verify_authentication_response,
+    options_to_json,
+)
+from webauthn.helpers import bytes_to_base64url, base64url_to_bytes
+from webauthn.helpers.structs import (
+    AuthenticatorSelectionCriteria,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import delete
@@ -8,7 +25,7 @@ from fastapi import HTTPException
 from app import models, schemas
 from app.sku import generar_sku
 from typing import Optional, List
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
 
@@ -18,6 +35,52 @@ MX_TZ = ZoneInfo("America/Mexico_City")
 def _centavos(v) -> Decimal:
     """Normaliza un monto a 2 decimales con el mismo redondeo que numeric(12,2)."""
     return Decimal(str(v if v is not None else 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+# ── BÚSQUEDA FLEXIBLE (espejo de frontend/app.js) ────────────────────
+
+_BUSQUEDA_STOPWORDS = {'de','del','la','el','los','las','un','una','unos','unas','y','o','con','para','por','en','al'}
+
+
+def _normalizar_busqueda(texto) -> str:
+    """Minúsculas y sin acentos, igual que normalizarBusqueda() del frontend."""
+    return ''.join(
+        c for c in unicodedata.normalize("NFD", str(texto or "").lower())
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def _variantes_busqueda(palabra: str) -> set:
+    """Tolerancia de plural y género (playeras→playera, blanca→blanco), igual que el frontend."""
+    variantes = {palabra}
+    if len(palabra) > 2 and palabra.endswith("s"):
+        sin_s = palabra[:-1]
+        variantes.add(sin_s)
+        if len(sin_s) > 2 and sin_s.endswith("e"):
+            variantes.add(sin_s[:-1])
+    for v in list(variantes):
+        if len(v) > 2:
+            if v.endswith("a"):
+                variantes.add(v[:-1] + "o")
+            elif v.endswith("o"):
+                variantes.add(v[:-1] + "a")
+    return variantes
+
+
+def _coincide_busqueda(campos, query: str) -> bool:
+    """Todas las palabras de `query` deben aparecer en algún campo, en cualquier orden."""
+    palabras = [
+        w for w in _normalizar_busqueda(query).split()
+        if len(w) >= 2 and w not in _BUSQUEDA_STOPWORDS
+    ]
+    if not palabras:
+        return True
+    textos = [_normalizar_busqueda(c) for c in campos if c]
+    for w in palabras:
+        variantes = _variantes_busqueda(w)
+        if not any(any(v in t for v in variantes) for t in textos):
+            return False
+    return True
 
 
 async def _contador_categoria(db: AsyncSession, categoria: str):
@@ -504,9 +567,233 @@ async def desactivar_totp_usuario(db: AsyncSession, user_id: int):
         return True
     return False
 
+
+# ── PASSKEYS / WEBAUTHN (segundo factor tras la contraseña) ──────────
+# La llave PRIVADA nunca sale del dispositivo del usuario (Windows Hello,
+# huella/PIN, llave USB). El servidor solo guarda la llave PÚBLICA.
+# El reto (challenge) se genera aquí y se conserva en memoria 5 minutos;
+# es válido porque la API corre con un solo proceso de uvicorn
+# (ver command en docker-compose.yml). Si algún día se usan varios
+# workers, habría que moverlo a la base de datos o a Redis.
+
+_WEBAUTHN_RETO_MINUTOS = 5
+_retos_registro: dict = {}   # user_id  -> (challenge: bytes, expira: datetime UTC)
+_retos_login: dict = {}      # username -> (challenge: bytes, expira: datetime UTC)
+
+
+def webauthn_config():
+    """Configuración del Relying Party (RP).
+
+    Por defecto funciona en el entorno local (http://localhost:3000).
+    En el VPS con HTTPS definir WEBAUTHN_RP_ID (dominio) y WEBAUTHN_ORIGIN
+    (https://dominio; admite varios separados por coma).
+    """
+    rp_id = os.getenv("WEBAUTHN_RP_ID", "localhost")
+    rp_name = os.getenv("WEBAUTHN_RP_NAME", "Inventario Pro")
+    origins = [o.strip() for o in os.getenv("WEBAUTHN_ORIGIN", "http://localhost:3000").split(",") if o.strip()]
+    return rp_id, rp_name, origins
+
+
+def _limpiar_retos():
+    """Descarta retos caducados (higiene simple del diccionario en memoria)."""
+    ahora = datetime.now(timezone.utc)
+    for d in (_retos_registro, _retos_login):
+        for k in [k for k, (_, exp) in d.items() if exp < ahora]:
+            d.pop(k, None)
+
+
+def _norm_b64(s: str) -> str:
+    """Forma canónica de la WebAuthn: base64url sin relleno '='."""
+    return (s or "").rstrip("=")
+
+
+async def usuario_tiene_passkeys(db: AsyncSession, user_id: int) -> bool:
+    q = await db.execute(
+        select(models.WebAuthnCredential.id)
+        .where(models.WebAuthnCredential.usuario_id == user_id)
+        .limit(1)
+    )
+    return q.scalar_one_or_none() is not None
+
+
+async def webauthn_opciones_registro(db: AsyncSession, user: models.Usuario):
+    """Paso 1 del registro: opciones para navigator.credentials.create()."""
+    rp_id, rp_name, _ = webauthn_config()
+    q = await db.execute(
+        select(models.WebAuthnCredential).where(models.WebAuthnCredential.usuario_id == user.id)
+    )
+    existentes = q.scalars().all()
+
+    opciones = generate_registration_options(
+        rp_id=rp_id,
+        rp_name=rp_name,
+        user_id=f"inv-{user.id}".encode(),
+        user_name=user.username,
+        user_display_name=user.nombre or user.username,
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            user_verification=UserVerificationRequirement.REQUIRED,
+            resident_key=ResidentKeyRequirement.PREFERRED,
+        ),
+        exclude_credentials=[
+            PublicKeyCredentialDescriptor(id=base64url_to_bytes(c.credential_id))
+            for c in existentes
+        ] or None,
+    )
+    _limpiar_retos()
+    _retos_registro[user.id] = (
+        opciones.challenge,
+        datetime.now(timezone.utc) + timedelta(minutes=_WEBAUTHN_RETO_MINUTOS),
+    )
+    return json.loads(options_to_json(opciones))
+
+
+async def webauthn_verificar_registro(
+    db: AsyncSession, user: models.Usuario, credencial: dict, nombre: Optional[str] = None
+):
+    """Paso 2 del registro: verifica la respuesta y guarda la llave pública."""
+    rp_id, _, origins = webauthn_config()
+
+    reto = _retos_registro.pop(user.id, None)
+    if not reto:
+        raise HTTPException(400, "No hay un registro de passkey en curso. Inténtalo de nuevo.")
+    challenge, expira = reto
+    if expira < datetime.now(timezone.utc):
+        raise HTTPException(400, "El registro expiró. Inténtalo de nuevo.")
+
+    try:
+        verificada = verify_registration_response(
+            credential=credencial,
+            expected_challenge=challenge,
+            expected_rp_id=rp_id,
+            expected_origin=origins,
+            require_user_verification=True,
+        )
+    except Exception as e:
+        raise HTTPException(400, f"Registro de passkey inválido: {e}")
+
+    cred_id = _norm_b64(bytes_to_base64url(verificada.credential_id))
+    q = await db.execute(
+        select(models.WebAuthnCredential).where(models.WebAuthnCredential.credential_id == cred_id)
+    )
+    if q.scalar_one_or_none():
+        raise HTTPException(400, "Esta passkey ya está registrada.")
+
+    transports = credencial.get("response", {}).get("transports") or []
+    fila = models.WebAuthnCredential(
+        usuario_id=user.id,
+        credential_id=cred_id,
+        public_key=bytes_to_base64url(verificada.credential_public_key),
+        sign_count=verificada.sign_count or 0,
+        transports=",".join(t for t in transports if isinstance(t, str)),
+        nombre=(nombre or "Passkey").strip()[:100],
+    )
+    db.add(fila)
     await db.commit()
-    await db.refresh(user)
-    return user
+    await db.refresh(fila)
+    return fila
+
+
+async def webauthn_opciones_login(db: AsyncSession, user: models.Usuario):
+    """Paso 1 del 2.º factor con passkey: opciones para navigator.credentials.get()."""
+    rp_id, _, _ = webauthn_config()
+    q = await db.execute(
+        select(models.WebAuthnCredential).where(models.WebAuthnCredential.usuario_id == user.id)
+    )
+    creds = q.scalars().all()
+    if not creds:
+        raise HTTPException(400, "Este usuario no tiene passkeys registradas.")
+
+    opciones = generate_authentication_options(
+        rp_id=rp_id,
+        allow_credentials=[
+            PublicKeyCredentialDescriptor(id=base64url_to_bytes(c.credential_id)) for c in creds
+        ],
+        user_verification=UserVerificationRequirement.REQUIRED,
+    )
+    _limpiar_retos()
+    _retos_login[user.username] = (
+        opciones.challenge,
+        datetime.now(timezone.utc) + timedelta(minutes=_WEBAUTHN_RETO_MINUTOS),
+    )
+    return json.loads(options_to_json(opciones))
+
+
+async def webauthn_verificar_login(db: AsyncSession, username: str, credencial: dict):
+    """Paso 2 del 2.º factor: verifica la firma de navigator.credentials.get().
+
+    Devuelve True si la firma es válida. La contraseña ya se validó en
+    /auth/login, así que esto es el segundo factor (posesión + huella/PIN).
+    """
+    rp_id, _, origins = webauthn_config()
+
+    reto = _retos_login.pop(username, None)
+    if not reto:
+        raise HTTPException(400, "No hay una verificación con passkey en curso. Inténtalo de nuevo.")
+    challenge, expira = reto
+    if expira < datetime.now(timezone.utc):
+        raise HTTPException(400, "La verificación expiró. Inténtalo de nuevo.")
+
+    cred_id = _norm_b64(str(credencial.get("id") or ""))
+    q = await db.execute(
+        select(models.WebAuthnCredential).where(models.WebAuthnCredential.credential_id == cred_id)
+    )
+    fila = q.scalar_one_or_none()
+    if not fila:
+        raise HTTPException(401, "Passkey desconocida para este usuario.")
+
+    # La credencial debe pertenecer exactamente al usuario del token temporal
+    q = await db.execute(select(models.Usuario).where(models.Usuario.id == fila.usuario_id))
+    dueno = q.scalar_one_or_none()
+    if not dueno or dueno.username != username:
+        raise HTTPException(401, "La passkey no pertenece a este usuario.")
+
+    try:
+        verificada = verify_authentication_response(
+            credential=credencial,
+            expected_challenge=challenge,
+            expected_rp_id=rp_id,
+            expected_origin=origins,
+            credential_public_key=base64url_to_bytes(fila.public_key),
+            credential_current_sign_count=fila.sign_count or 0,
+            require_user_verification=True,
+        )
+    except Exception as e:
+        raise HTTPException(401, f"Verificación de passkey fallida: {e}")
+
+    # Contador anti-clonación: si retrocede (con ambos valores > 0) la
+    # credencial pudo ser copiada (authenticator clonado). Se rechaza.
+    nuevo_conteo = verificada.new_sign_count or 0
+    if (fila.sign_count or 0) > 0 and nuevo_conteo > 0 and nuevo_conteo <= fila.sign_count:
+        raise HTTPException(401, "Contador de la passkey inconsistente (posible copia). Contáctanos.")
+
+    fila.sign_count = max(nuevo_conteo, fila.sign_count or 0)
+    fila.ultimo_uso = datetime.now(timezone.utc)
+    await db.commit()
+    return True
+
+
+async def listar_passkeys(db: AsyncSession, user_id: int):
+    q = await db.execute(
+        select(models.WebAuthnCredential)
+        .where(models.WebAuthnCredential.usuario_id == user_id)
+        .order_by(models.WebAuthnCredential.id)
+    )
+    return q.scalars().all()
+
+
+async def eliminar_passkey(db: AsyncSession, user_id: int, cred_id: int):
+    q = await db.execute(
+        select(models.WebAuthnCredential).where(
+            models.WebAuthnCredential.id == cred_id,
+            models.WebAuthnCredential.usuario_id == user_id,
+        )
+    )
+    fila = q.scalar_one_or_none()
+    if not fila:
+        raise HTTPException(404, "Passkey no encontrada")
+    await db.delete(fila)
+    await db.commit()
+    return True
 
 
 async def eliminar_usuario(db: AsyncSession, id: int):
@@ -520,15 +807,21 @@ async def eliminar_usuario(db: AsyncSession, id: int):
 
 
 async def seed_admin_if_empty(db: AsyncSession):
-    """Si no hay usuarios en la BD, crea el admin por defecto."""
+    """Si no hay usuarios en la BD, crea el admin por defecto.
+
+    La contraseña inicial se toma de ADMIN_INITIAL_PASSWORD; si no está
+    definida, se genera una aleatoria y se imprime una única vez.
+    """
+    import secrets
     from app.auth import hash_password
     result = await db.execute(select(models.Usuario).limit(1))
     if result.scalar_one_or_none() is None:
+        password = os.getenv("ADMIN_INITIAL_PASSWORD") or secrets.token_urlsafe(16)
         admin = models.Usuario(
             username="admin",
             nombre="Administrador Principal",
             email="admin@inventario.pro",
-            password_hash=hash_password("admin1234"),
+            password_hash=hash_password(password),
             rol="admin",
             activo=1,
         )
@@ -537,8 +830,11 @@ async def seed_admin_if_empty(db: AsyncSession):
         print("=" * 55)
         print("  USUARIO ADMIN CREADO AUTOMÁTICAMENTE")
         print("  Usuario:    admin")
-        print("  Contraseña: admin1234")
-        print("  ⚠️  CAMBIA ESTA CONTRASEÑA PRONTO")
+        if os.getenv("ADMIN_INITIAL_PASSWORD"):
+            print("  Contraseña: (la definida en ADMIN_INITIAL_PASSWORD)")
+        else:
+            print(f"  Contraseña temporal: {password}")
+            print("  ⚠️  GUÁRDALA AHORA — no se volverá a mostrar. Cámbiala al entrar.")
         print("=" * 55)
 
 
@@ -687,7 +983,10 @@ async def crear_backup_db() -> Optional[str]:
     except Exception:
         # Fallback a variables de entorno
         user = os.getenv("POSTGRES_USER", "inventario")
-        password = os.getenv("POSTGRES_PASSWORD", "inventario_secret_pwd_123")
+        password = os.getenv("POSTGRES_PASSWORD")
+        if not password:
+            print("[BACKUP ERROR] Sin contraseña de BD disponible: revisa DATABASE_URL o POSTGRES_PASSWORD.")
+            return None
         host = "db"
         port = "5432"
         dbname = os.getenv("POSTGRES_DB", "inventario_db")
@@ -802,7 +1101,10 @@ async def restaurar_backup_db(nombre_archivo: str) -> bool:
         port = host_port.split(":")[1] if ":" in host_port else "5432"
     except Exception:
         user = os.getenv("POSTGRES_USER", "inventario")
-        password = os.getenv("POSTGRES_PASSWORD", "inventario_secret_pwd_123")
+        password = os.getenv("POSTGRES_PASSWORD")
+        if not password:
+            print("[BACKUP ERROR] Sin contraseña de BD disponible: revisa DATABASE_URL o POSTGRES_PASSWORD.")
+            return False
         host = "db"
         port = "5432"
         dbname = os.getenv("POSTGRES_DB", "inventario_db")
@@ -893,7 +1195,8 @@ async def get_ventas_agrupadas(
         select(models.Movimiento, models.Producto.sku)
         .outerjoin(models.Producto, models.Movimiento.producto_id == models.Producto.id)
         .where(models.Movimiento.tipo == "venta")
-        .order_by(models.Movimiento.fecha.desc())
+        # desempate por id: orden estable para la paginación por folios
+        .order_by(models.Movimiento.fecha.desc(), models.Movimiento.id.desc())
     )
 
     if canal and canal != "Todos" and canal != "":
@@ -953,17 +1256,15 @@ async def get_ventas_agrupadas(
     grouped_list = list(groups.values())
 
     if query:
-        q_clean = query.strip().lower()
-        filtered_list = []
-        for g in grouped_list:
-            match = (
-                q_clean in g["folio"].lower() or 
-                q_clean in g["canal"].lower() or 
-                any(q_clean in d["producto_nombre"].lower() or q_clean in d["sku"].lower() for d in g["detalles"])
+        grouped_list = [
+            g for g in grouped_list
+            if _coincide_busqueda(
+                [g["folio"], g["canal"]]
+                + [d["producto_nombre"] for d in g["detalles"]]
+                + [d["sku"] for d in g["detalles"]],
+                query,
             )
-            if match:
-                filtered_list.append(g)
-        grouped_list = filtered_list
+        ]
 
     return grouped_list[skip : skip + limit]
 

@@ -13,10 +13,12 @@ for p in paths_to_try:
         load_dotenv(p)
         break
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://inventario:inventario_secret_pwd_123@localhost:5432/inventario_db"
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "La variable de entorno DATABASE_URL no está definida. "
+        "Copia .env.example a .env en la raíz del proyecto y configura tus credenciales."
+    )
 # If the URL still points to the Docker service name, replace it for local execution
 if not os.getenv("IS_DOCKER") and "@db:" in DATABASE_URL:
     DATABASE_URL = DATABASE_URL.replace("@db:", "@localhost:")
