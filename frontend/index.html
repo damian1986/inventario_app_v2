@@ -726,6 +726,21 @@
         </div>
       </div>
 
+      <div class="sales-card card-flush" style="margin-top:20px;">
+        <h3 class="section-title">📄 Conteo por Plantilla Excel</h3>
+        <p style="font-size:0.85rem; color:#666; margin-bottom:15px;">Descarga la plantilla (solo grupos con stock), cuenta físicamente y llena únicamente la columna "Conteo" (amarilla). Después impórtala aquí para ver las diferencias abajo.</p>
+        <div class="form-row" style="align-items:flex-end;">
+          <div class="form-group">
+            <button class="btn btn-outline" onclick="descargarPlantillaConteo()">⬇️ Descargar plantilla</button>
+          </div>
+          <div class="form-group">
+            <input type="file" id="c-import-file" accept=".xlsx" style="display:none" onchange="importarConteoFisico(this)">
+            <button class="btn btn-primary" onclick="document.getElementById('c-import-file').click()">📤 Importar conteo</button>
+          </div>
+        </div>
+        <div id="c-import-avisos" style="display:none; background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:12px 14px; margin-top:15px;"></div>
+      </div>
+
       <div class="inventory-card" style="margin-top:20px;">
         <div id="conteo-list" class="cart-area" style="min-height:300px;">
           <div class="cart-empty">Aún no has escaneado ningún producto</div>
@@ -1698,7 +1713,7 @@
     <script src="app.js?v=1.3.0"></script>
     <script src="oc.js?v=1.0.6"></script>
     <script src="dashboard.js?v=1.0.1"></script>
-    <script src="conteo.js?v=1.0.2"></script>
+    <script src="conteo.js?v=1.1.0"></script>
     <script src="contabilidad.js?v=1.0.1"></script>
 
     <!-- Modal Alertas Inteligentes -->
