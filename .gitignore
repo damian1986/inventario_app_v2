@@ -16,5 +16,8 @@ postgres_data/
 # Backups locales de base de datos (dumps SQL)
 backups/
 
+# Fotos de diseños devueltos (subidas por usuarios)
+backend/uploads/
+
 # IDEs
 .vscode/

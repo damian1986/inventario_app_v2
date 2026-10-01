@@ -73,6 +73,7 @@ def create_snapshot():
             for file in files:
                 ext = os.path.splitext(file)[1]
                 if ext in IGNORE_EXTS: continue
+                if file.startswith("~$"): continue  # bloqueos temporales de Office: ilegibles si el documento está abierto
                 
                 abs_file = os.path.join(root, file)
                 rel_file = os.path.relpath(abs_file, PROJECT_ROOT)

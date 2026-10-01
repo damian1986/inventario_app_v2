@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, Query, status, Request
+from fastapi import FastAPI, Depends, HTTPException, Query, status, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -275,18 +275,23 @@ async def obtener_ventas_agrupadas(
     )
 
 
-@app.post("/ventas/devolver",
+@app.post("/ventas/devolver", response_model=schemas.DevolucionParcialResultOut,
           dependencies=[Depends(require_role("admin"))])
 async def devolver_venta_parcial(
     data: schemas.DevolucionParcialRequest,
     db: AsyncSession = Depends(get_db),
     current_user: models.Usuario = Depends(get_current_user)
 ):
-    await services.procesar_devolucion_parcial(
+    devoluciones = await services.procesar_devolucion_parcial(
         db, folio=data.folio, items=data.items, 
-        usuario_id=current_user.id, username=current_user.username
+        usuario_id=current_user.id, username=current_user.username,
+        piezas=data.piezas
     )
-    return {"status": "ok", "mensaje": "Devolución procesada correctamente e inventario actualizado"}
+    return {
+        "status": "ok",
+        "mensaje": "Devolución procesada correctamente e inventario actualizado",
+        "devoluciones": devoluciones,
+    }
 
 
 @app.post("/ventas/cancelar-completo/{folio}",
@@ -300,6 +305,127 @@ async def cancelar_venta_completa(
         db, folio=folio, usuario_id=current_user.id, username=current_user.username
     )
     return {"status": "ok", "mensaje": f"Venta con folio {folio} cancelada completamente"}
+
+
+# ── DEVOLUCIONES (PLAYERAS DEVUELTAS) ────────────────────────────────
+
+@app.get("/devoluciones", response_model=List[schemas.DevolucionOut],
+         dependencies=[Depends(require_role("admin", "vendedor", "bodeguero"))])
+async def listar_devoluciones(
+    estado: Optional[str] = Query(None),
+    producto_id: Optional[int] = Query(None),
+    query: Optional[str] = Query(None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=500, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db)
+):
+    """Lista las piezas devueltas. Todos los roles pueden verlas; admin las registra/edita."""
+    return await services.get_devoluciones(
+        db, estado=estado, producto_id=producto_id, query=query, skip=skip, limit=limit
+    )
+
+
+@app.get("/devoluciones/resumen", response_model=schemas.DevolucionResumenOut,
+         dependencies=[Depends(require_role("admin", "vendedor", "bodeguero"))])
+async def resumen_devoluciones(db: AsyncSession = Depends(get_db)):
+    """Unidades devueltas disponibles por producto (columna «Devueltas» del inventario)."""
+    return await services.get_devoluciones_resumen(db)
+
+
+@app.post("/devoluciones", response_model=schemas.DevolucionOut, status_code=201,
+          dependencies=[Depends(require_role("admin"))])
+async def crear_devolucion(
+    producto_id: int = Form(...),
+    qty: int = Form(1),
+    diseno: str = Form(...),
+    motivo: str = Form(""),
+    notas: str = Form(""),
+    precio: Optional[float] = Form(None),
+    ya_contada: bool = Form(False),
+    foto: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    """Alta manual de una pieza devuelta (solo admin). La foto del diseño es obligatoria."""
+    contenido = await foto.read()
+    return await services.crear_devolucion_manual(
+        db, producto_id=producto_id, qty=qty, diseno=diseno, motivo=motivo, notas=notas,
+        precio=precio, ya_contada=ya_contada,
+        contenido_imagen=contenido, filename_imagen=foto.filename or "",
+        usuario_id=current_user.id, username=current_user.username
+    )
+
+
+@app.patch("/devoluciones/{dev_id}", response_model=schemas.DevolucionOut,
+           dependencies=[Depends(require_role("admin"))])
+async def editar_devolucion(
+    dev_id: int,
+    data: schemas.DevolucionUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    return await services.actualizar_devolucion(
+        db, dev_id, data,
+        usuario_id=current_user.id, username=current_user.username
+    )
+
+
+@app.post("/devoluciones/{dev_id}/imagen", response_model=schemas.DevolucionOut,
+          dependencies=[Depends(require_role("admin"))])
+async def subir_imagen_devolucion(
+    dev_id: int,
+    foto: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    contenido = await foto.read()
+    return await services.guardar_imagen_devolucion(
+        db, dev_id, contenido, foto.filename or "",
+        usuario_id=current_user.id, username=current_user.username
+    )
+
+
+@app.get("/devoluciones/{dev_id}/imagen",
+         dependencies=[Depends(require_role("admin", "vendedor", "bodeguero"))])
+async def obtener_imagen_devolucion(dev_id: int, db: AsyncSession = Depends(get_db)):
+    d = await services.get_devolucion(db, dev_id)
+    ruta = services.ruta_imagen_devolucion(d)
+    if not ruta:
+        raise HTTPException(status_code=404, detail="Esta pieza no tiene foto del diseño")
+    media_types = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+    ext = os.path.splitext(ruta)[1].lower()
+    return FileResponse(ruta, media_type=media_types.get(ext, "application/octet-stream"))
+
+
+@app.post("/devoluciones/{dev_id}/vender", response_model=schemas.DevolucionVenderOut,
+          dependencies=[Depends(require_role("admin", "vendedor"))])
+async def vender_devolucion(
+    dev_id: int,
+    data: Optional[schemas.DevolucionVenderIn] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    """Vende una pieza devuelta (admin y vendedor). Descuenta stock y genera su folio de venta."""
+    d, folio = await services.vender_devolucion(
+        db, dev_id, data,
+        usuario_id=current_user.id, username=current_user.username
+    )
+    return {"status": "ok", "mensaje": f"Pieza vendida con folio {folio}", "folio": folio, "devolucion": d}
+
+
+@app.post("/devoluciones/{dev_id}/descartar", response_model=schemas.DevolucionOut,
+          dependencies=[Depends(require_role("admin"))])
+async def descartar_devolucion(
+    dev_id: int,
+    data: Optional[schemas.DevolucionDescartarIn] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    """Descarta una pieza devuelta (solo admin). Descuenta el stock y deja movimiento de ajuste."""
+    return await services.descartar_devolucion(
+        db, dev_id, data,
+        usuario_id=current_user.id, username=current_user.username
+    )
 
 
 # ── AJUSTES ──────────────────────────────────────────────────────────

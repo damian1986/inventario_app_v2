@@ -7,7 +7,7 @@
     <!-- Evitar error 404 de favicon -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📦</text></svg>">
     <!-- CSS -->
-    <link rel="stylesheet" href="styles.css?v=2.0.1" />
+    <link rel="stylesheet" href="styles.css?v=2.0.3" />
     <!-- External Libraries -->
     <script src="https://cdn.jsdelivr.net/npm/exceljs@4.3.0/dist/exceljs.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
@@ -108,6 +108,10 @@
           <button class="sidebar-item" id="nav-conteo" onclick="showPage('conteo', this)" data-tooltip="Conteo Físico">
             <div class="sidebar-item-icon">📦</div>
             <div class="sidebar-item-label">Conteo Físico</div>
+          </button>
+          <button class="sidebar-item" id="nav-devoluciones" onclick="showPage('devoluciones', this)" data-tooltip="Devoluciones">
+            <div class="sidebar-item-icon">↩️</div>
+            <div class="sidebar-item-label">Devoluciones</div>
           </button>
           <button class="sidebar-item" id="nav-ordenes" onclick="showPage('ordenes_compra', this)" data-tooltip="Órdenes de Compra">
             <div class="sidebar-item-icon">🛒</div>
@@ -346,6 +350,7 @@
             <th>Categoría</th>
             <th>Variantes</th>
             <th>Cantidad</th>
+            <th title="Unidades en devolución disponibles para reventa">Devueltas</th>
             <th>Costo</th>
             <th>Venta</th>
             <th>Estado</th>
@@ -751,6 +756,53 @@
         <button class="btn btn-outline" onclick="limpiarConteo()">🗑️ Reiniciar Sesión</button>
         <button class="btn btn-success" onclick="procesarConteoFisico()">✅ Finalizar y Ajustar Inventario</button>
       </div>
+    </div>
+
+    <!-- PLAYERAS EN DEVOLUCIÓN -->
+    <div class="page" id="page-devoluciones">
+      <div class="stats">
+        <div class="stat-card green">
+          <div class="label">Unidades Disponibles</div>
+          <div class="value" id="dev-stat-disp">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">Piezas Activas</div>
+          <div class="value" id="dev-stat-activas">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">Unidades Vendidas</div>
+          <div class="value" id="dev-stat-vend">0</div>
+        </div>
+        <div class="stat-card red">
+          <div class="label">Unidades Descartadas</div>
+          <div class="value" id="dev-stat-desc">0</div>
+        </div>
+      </div>
+
+      <div class="sales-card card-flush">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+          <h3 class="section-title" style="margin-bottom:0;">↩️ Playeras en Devolución</h3>
+          <button class="btn btn-primary" id="dev-btn-nueva" onclick="abrirAltaDevolucion()" style="display:none;">+ Registrar devolución</button>
+        </div>
+        <p style="font-size:0.85rem; color:#666; margin:10px 0 15px;">Piezas devueltas por clientes y listas para volver a venderse. Cada pieza conserva su diseño y foto para distinguirla aunque compartan talla y color.</p>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+          <input type="text" id="dev-busqueda" placeholder="🔍 Buscar por producto, diseño, folio…" oninput="filtrarDevoluciones(this.value)" style="flex:1; min-width:220px; padding:10px 14px; border:1px solid rgba(171,173,175,0.15); border-radius:12px;">
+          <div id="dev-filtros" style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="dev-chip active" onclick="filtrarDevolucionesEstado('todas', this)">Todas</button>
+            <button class="dev-chip" onclick="filtrarDevolucionesEstado('disponible', this)">Disponibles</button>
+            <button class="dev-chip" onclick="filtrarDevolucionesEstado('vendida', this)">Vendidas</button>
+            <button class="dev-chip" onclick="filtrarDevolucionesEstado('descartada', this)">Descartadas</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="inventory-card" style="margin-top:20px;">
+        <div id="dev-lista" style="min-height:200px;">
+          <div class="cart-empty">Cargando piezas devueltas…</div>
+        </div>
+      </div>
+
+      <input type="file" id="dev-foto-file" accept="image/*" style="display:none" onchange="onFotoDevolucionSeleccionada(this)">
     </div>
 
     <!-- USUARIOS -->
@@ -1610,7 +1662,7 @@
       <div class="modal">
         <h2 id="dp-title">Devolución Parcial de Productos</h2>
         <p id="dp-subtitle" style="font-size:0.85rem; color:#666; margin-bottom:15px;"></p>
-        <div style="max-height:300px; overflow-y:auto; border:1px solid #eee; border-radius:8px; margin-bottom:20px;">
+        <div style="max-height:420px; overflow-y:auto; border:1px solid #eee; border-radius:8px; margin-bottom:20px;">
           <table class="table-compact" style="width:100%;">
             <thead>
               <tr>
@@ -1625,6 +1677,79 @@
         <div class="modal-footer">
           <button class="btn btn-outline" onclick="closeModal('devolucion-parcial')">Cancelar</button>
           <button class="btn btn-danger" onclick="confirmarDevolucionParcial()">Procesar Devolución</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL ALTA / EDICIÓN PIEZA DEVUELTA -->
+    <div class="overlay" id="overlay-dev-alta">
+      <div class="modal">
+        <h2 id="dev-alta-title">↩️ Registrar pieza devuelta</h2>
+        <div class="form-row">
+          <div class="form-group" style="flex:2; position:relative;">
+            <label>Producto *</label>
+            <input type="text" id="dev-alta-producto-buscar" placeholder="Buscar por nombre o SKU…" autocomplete="off" oninput="buscarProductoDevolucion(this.value)">
+            <input type="hidden" id="dev-alta-producto-id">
+            <div id="dev-alta-producto-results" class="dev-resultados" style="display:none;"></div>
+          </div>
+          <div class="form-group">
+            <label>Cantidad *</label>
+            <input type="number" id="dev-alta-qty" min="1" value="1">
+          </div>
+          <div class="form-group">
+            <label>Precio de venta</label>
+            <input type="number" id="dev-alta-precio" min="0" step="0.01" placeholder="Auto (precio de lista)">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Diseño (para distinguirla) *</label>
+          <input type="text" id="dev-alta-diseno" placeholder="Ej: Playera negra con estampado de tigre al frente">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Motivo de devolución</label>
+            <input type="text" id="dev-alta-motivo" placeholder="Ej: Talla equivocada">
+          </div>
+          <div class="form-group">
+            <label>Notas</label>
+            <input type="text" id="dev-alta-notas" placeholder="Opcional">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Foto del diseño *</label>
+          <input type="file" id="dev-alta-foto" accept="image/*" onchange="previsualizarFotoDevolucion(this)">
+          <small id="dev-alta-foto-hint" style="color:#666;">La foto del diseño es obligatoria.</small>
+        </div>
+        <img id="dev-alta-foto-preview" style="display:none; max-width:100%; max-height:220px; border-radius:12px; margin-bottom:12px;" alt="Vista previa de la foto">
+        <div class="form-group" id="dev-alta-contada-wrap">
+          <label style="display:flex; align-items:center; gap:8px; font-weight:600;">
+            <input type="checkbox" id="dev-alta-contada" style="width:auto;">
+            Ya está contada en el stock actual (no sumar de nuevo)
+          </label>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="closeModal('dev-alta')">Cancelar</button>
+          <button class="btn btn-primary" id="dev-alta-guardar" onclick="guardarDevolucion()">Guardar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL VENDER PIEZA DEVUELTA -->
+    <div class="overlay" id="overlay-dev-vender">
+      <div class="modal modal-sm">
+        <h2>💰 Vender pieza devuelta</h2>
+        <div id="dev-vender-resumen" style="background:var(--surface-container-low); border-radius:12px; padding:12px 14px; margin-bottom:15px;"></div>
+        <div class="form-group">
+          <label>Canal de venta</label>
+          <input type="text" id="dev-vender-canal" value="Devolución">
+        </div>
+        <div class="form-group">
+          <label>Notas</label>
+          <input type="text" id="dev-vender-notas" placeholder="Opcional">
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="closeModal('dev-vender')">Cancelar</button>
+          <button class="btn btn-success" onclick="confirmarVenderDevolucion()">✅ Confirmar venta</button>
         </div>
       </div>
     </div>
@@ -1710,10 +1835,11 @@
       </div>
     </div>
 
-    <script src="app.js?v=1.3.0"></script>
+    <script src="app.js?v=1.4.1"></script>
     <script src="oc.js?v=1.0.6"></script>
     <script src="dashboard.js?v=1.0.1"></script>
     <script src="conteo.js?v=1.1.0"></script>
+    <script src="devoluciones.js?v=1.1.0"></script>
     <script src="contabilidad.js?v=1.0.1"></script>
 
     <!-- Modal Alertas Inteligentes -->

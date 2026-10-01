@@ -428,6 +428,11 @@ function toast(msg, ok=true){
 async function loadProductos(){
   try{
     productos=await req('GET','/productos');
+    try {
+      const devRes = await req('GET','/devoluciones/resumen');
+      window.devResumenDisponibles = {};
+      (devRes.items || []).forEach(it => { window.devResumenDisponibles[it.producto_id] = it.disponibles; });
+    } catch(e) { /* sin permiso o sin conexión: la columna Devueltas queda vacía */ }
     const rep = await req('GET', '/reporte');
     window.globalSalesMap = {};
     if (rep && rep.top_productos) {
@@ -622,14 +627,16 @@ function renderInventario(){
     const variantPart = p.nombre.includes(sep) ? p.nombre.substring(p.nombre.indexOf(sep) + sep.length).trim() : '';
     if (variantPart) { color = extractColorSize(variantPart).color; }
     if (!groups[key]) {
-      groups[key] = { baseName, categoria: p.categoria, totalQty: 0, totalCosto: 0, totalVendido: 0, minStock: 0, lowCount: 0, outCount: 0, colors: {} };
+      groups[key] = { baseName, categoria: p.categoria, totalQty: 0, totalCosto: 0, totalVendido: 0, totalDev: 0, minStock: 0, lowCount: 0, outCount: 0, colors: {} };
     }
-    if (!groups[key].colors[color]) { groups[key].colors[color] = { items: [], totalQty: 0 }; }
+    if (!groups[key].colors[color]) { groups[key].colors[color] = { items: [], totalQty: 0, totalDev: 0 }; }
     const g = groups[key];
     const cg = g.colors[color];
     cg.items.push(p);
     cg.totalQty += p.qty;
+    cg.totalDev += (window.devResumenDisponibles[p.id] || 0);
     g.totalQty += p.qty;
+    g.totalDev += (window.devResumenDisponibles[p.id] || 0);
     g.totalCosto += (p.costo || 0) * p.qty;
     g.totalVendido += (window.globalSalesMap[p.nombre] || 0);
     const s = getStatus(p.qty, p.min_stock);
@@ -671,6 +678,7 @@ function renderInventario(){
           ${g.lowCount > 0 ? `<span class="mini-badge badge-low" title="${g.lowCount} variantes con stock bajo">⚠️${g.lowCount}</span>` : ''}
           ${g.outCount > 0 ? `<span class="mini-badge badge-out" title="${g.outCount} variantes sin stock">❌${g.outCount}</span>` : ''}
         </td>
+        <td>${g.totalDev > 0 ? `<span class="chip" style="background:#dcfce7; color:#166534; font-weight:700;" title="Unidades devueltas disponibles para reventa">↩️ ${g.totalDev}</span>` : '<span style="color:#cbd5e1;">—</span>'}</td>
         <td><span class="aggregate-cost" title="Costo total de stock actual">${mxn(g.totalCosto)}</span></td>
         <td><span class="aggregate-venta" title="Total vendido históricamente">${mxn(g.totalVendido)}</span></td>
         <td>${statusBadge(g.totalQty, g.minStock)}</td>
@@ -705,6 +713,7 @@ function renderInventario(){
               <td>—</td>
               <td><span style="font-size:0.8rem; color:#888;">${cg.items.length} tallas</span></td>
               <td style="font-weight:600;">${cg.totalQty}</td>
+              <td>${cg.totalDev > 0 ? `<span class="chip" style="background:#dcfce7; color:#166534; font-weight:700;" title="Unidades devueltas disponibles para reventa">↩️ ${cg.totalDev}</span>` : '<span style="color:#cbd5e1;">—</span>'}</td>
               <td class="aggregate-cost" title="Costo stock este color">${mxn(cgCosto)}</td>
               <td class="aggregate-venta" title="Vendido este color">${mxn(cgVendido)}</td>
               <td>—</td><td>
@@ -740,6 +749,7 @@ function renderInventario(){
                   <span>${p.qty}</span>
                   <button onclick="quickQty(${p.id},1)">+</button>
                 </div></td>
+                <td>${(window.devResumenDisponibles[p.id] || 0) > 0 ? `<span class="chip" style="background:#dcfce7; color:#166534; font-weight:700;" title="Unidades devueltas disponibles para reventa">↩️ ${window.devResumenDisponibles[p.id]}</span>` : '<span style="color:#cbd5e1;">—</span>'}</td>
                 <td>${mxn(p.costo)}</td><td>${mxn(p.venta)}</td>
                 <td>${statusBadge(p.qty, p.min_stock)}</td>
                 <td>
@@ -1392,6 +1402,8 @@ window.showPage = async function(id, btn) {
        if(window.loadAuditStats) await window.loadAuditStats();
     } else if (id === 'contabilidad') {
        if(window.renderContabilidad) await window.renderContabilidad();
+    } else if (id === 'devoluciones') {
+       if(window.renderDevoluciones) await window.renderDevoluciones();
     }
   } catch (err) {
     console.error('Error al cargar página:', id, err);
@@ -2252,14 +2264,15 @@ window.eliminarVentaCompleta = function(folio) {
   });
 };
 
+// ── Devolución parcial: editor de piezas (diseño + foto por diseño) ─
 window.abrirModalDevolucion = function(folio) {
   const sale = currentGroupedSales.find(s => s.folio === folio);
   if (!sale) return;
 
   activeDevolucionFolio = folio;
   const subTitleEl = document.getElementById('dp-subtitle');
-  if (subTitleEl) subTitleEl.textContent = `Folio: ${folio} (${sale.canal})`;
-  
+  if (subTitleEl) subTitleEl.textContent = `Folio: ${folio} (${sale.canal}) · Cada unidad devuelta requiere diseño y foto para poder revenderse.`;
+
   const tbody = document.getElementById('dp-body');
   if (!tbody) return;
   tbody.innerHTML = '';
@@ -2272,13 +2285,123 @@ window.abrirModalDevolucion = function(folio) {
       </td>
       <td style="padding:8px 12px; text-align:center; font-weight:bold; font-size:0.8rem;">${d.qty}</td>
       <td style="padding:8px 12px; text-align:center;">
-        <input type="number" class="devolucion-qty-input" data-mov-id="${escapeHtml(d.movimiento_id)}" min="0" max="${escapeHtml(d.qty)}" value="0" style="width:70px; text-align:center; padding:4px; font-size:0.8rem; border-radius:4px; border:1px solid #cbd5e1;">
+        <input type="number" class="devolucion-qty-input" data-mov-id="${escapeHtml(d.movimiento_id)}" min="0" max="${escapeHtml(d.qty)}" value="0" style="width:70px; text-align:center; padding:4px; font-size:0.8rem; border-radius:4px; border:1px solid #cbd5e1;" oninput="dpSincronizarPiezas(this)">
       </td>
     `;
     tbody.appendChild(tr);
+
+    const trPiezas = document.createElement('tr');
+    trPiezas.className = 'dp-piezas-tr';
+    trPiezas.style.display = 'none';
+    trPiezas.innerHTML = `
+      <td colspan="3" class="dp-piezas-td">
+        <div class="dp-piezas-editor">
+          <div class="dp-piezas-titulo">🎨 Diseño y foto de cada pieza devuelta</div>
+          <div class="dp-slots"></div>
+          <div class="dp-piezas-pie">
+            <button class="btn btn-sm btn-outline" type="button" onclick="dpAgregarPieza(this)">+ Otro diseño distinto</button>
+            <span class="dp-restante"></span>
+          </div>
+        </div>
+      </td>
+    `;
+    tbody.appendChild(trPiezas);
+    _dpAgregarSlot(trPiezas.querySelector('.dp-slots'), 1);
   });
 
   openModal('devolucion-parcial');
+};
+
+function _dpContexto(inputQty) {
+  const trPiezas = inputQty.closest('tr').nextElementSibling;
+  if (!trPiezas || !trPiezas.classList.contains('dp-piezas-tr')) return null;
+  return {
+    trPiezas,
+    slots: [...trPiezas.querySelectorAll('.dp-slot')],
+    rowQty: Math.max(0, parseInt(inputQty.value) || 0)
+  };
+}
+
+function _dpSumaSlots(slots) {
+  return slots.reduce((a, s) => a + (parseInt(s.querySelector('.dp-slot-qty').value) || 0), 0);
+}
+
+function _dpActualizarRestante(trPiezas, rowQty) {
+  const el = trPiezas.querySelector('.dp-restante');
+  if (!el) return;
+  const suma = _dpSumaSlots([...trPiezas.querySelectorAll('.dp-slot')]);
+  const ok = suma === rowQty;
+  el.textContent = `${ok ? '✓' : '⚠'} ${suma} de ${rowQty} unidades asignadas`;
+  el.style.color = ok ? '#16a34a' : '#dc2626';
+}
+
+function _dpAgregarSlot(contSlots, qty) {
+  const slot = document.createElement('div');
+  slot.className = 'dp-slot';
+  slot.innerHTML = `
+    <input type="text" class="dp-slot-diseno" placeholder="Diseño (ej. Calvario negro)" maxlength="200">
+    <input type="number" class="dp-slot-qty" min="1" value="${qty}" title="Unidades con este diseño" oninput="dpRecalcular(this)">
+    <label class="dp-slot-foto-lbl" title="Foto de este diseño (obligatoria)">
+      <span class="dp-slot-foto-txt">📷 Foto…</span>
+      <input type="file" class="dp-slot-foto" accept="image/*" onchange="dpFotoElegida(this)">
+    </label>
+    <button class="dp-slot-quitar" type="button" title="Quitar este diseño" onclick="dpQuitarPieza(this)">✕</button>
+  `;
+  contSlots.appendChild(slot);
+}
+
+window.dpSincronizarPiezas = function(inputQty) {
+  const ctx = _dpContexto(inputQty);
+  if (!ctx) return;
+  ctx.trPiezas.style.display = ctx.rowQty > 0 ? '' : 'none';
+  if (ctx.rowQty <= 0) return;
+  if (ctx.slots.length === 1) ctx.slots[0].querySelector('.dp-slot-qty').value = ctx.rowQty;
+  _dpActualizarRestante(ctx.trPiezas, ctx.rowQty);
+};
+
+window.dpRecalcular = function(inputSlotQty) {
+  const trPiezas = inputSlotQty.closest('.dp-piezas-tr');
+  if (!trPiezas) return;
+  const rowInput = trPiezas.previousElementSibling.querySelector('.devolucion-qty-input');
+  _dpActualizarRestante(trPiezas, Math.max(0, parseInt(rowInput.value) || 0));
+};
+
+window.dpAgregarPieza = function(btn) {
+  const trPiezas = btn.closest('.dp-piezas-tr');
+  if (!trPiezas) return;
+  const rowInput = trPiezas.previousElementSibling.querySelector('.devolucion-qty-input');
+  const rowQty = Math.max(0, parseInt(rowInput.value) || 0);
+  const slots = [...trPiezas.querySelectorAll('.dp-slot')];
+  if (rowQty <= 0) { toast('Primero indica cuántas unidades se devuelven.', false); return; }
+  if (rowQty > _dpSumaSlots(slots)) {
+    // Quedan unidades sin asignar: el nuevo diseño toma 1 de ahí
+    _dpAgregarSlot(trPiezas.querySelector('.dp-slots'), 1);
+  } else {
+    // Todo asignado: se divide 1 unidad del primer diseño que tenga al menos 2
+    const donante = slots.find(s => (parseInt(s.querySelector('.dp-slot-qty').value) || 0) >= 2);
+    if (!donante) { toast('Cada diseño necesita al menos 1 unidad; ajusta las cantidades para agregar otro.', false); return; }
+    const inp = donante.querySelector('.dp-slot-qty');
+    inp.value = (parseInt(inp.value) || 0) - 1;
+    _dpAgregarSlot(trPiezas.querySelector('.dp-slots'), 1);
+  }
+  _dpActualizarRestante(trPiezas, rowQty);
+};
+
+window.dpQuitarPieza = function(btn) {
+  const trPiezas = btn.closest('.dp-piezas-tr');
+  const slots = [...trPiezas.querySelectorAll('.dp-slot')];
+  if (slots.length <= 1) { toast('Debe quedar al menos un diseño.', false); return; }
+  btn.closest('.dp-slot').remove();
+  const restantes = [...trPiezas.querySelectorAll('.dp-slot')];
+  const rowInput = trPiezas.previousElementSibling.querySelector('.devolucion-qty-input');
+  const rowQty = Math.max(0, parseInt(rowInput.value) || 0);
+  if (restantes.length === 1) restantes[0].querySelector('.dp-slot-qty').value = rowQty;
+  _dpActualizarRestante(trPiezas, rowQty);
+};
+
+window.dpFotoElegida = function(input) {
+  const txt = input.closest('.dp-slot-foto-lbl').querySelector('.dp-slot-foto-txt');
+  if (txt) txt.textContent = (input.files && input.files.length) ? '✅ ' + input.files[0].name : '📷 Foto…';
 };
 
 window.cerrarModalDevolucion = function() {
@@ -2290,24 +2413,43 @@ window.confirmarDevolucionParcial = async function() {
   if (!activeDevolucionFolio) return;
 
   const items = [];
-  const inputs = document.querySelectorAll('.devolucion-qty-input');
+  const piezas = [];
+  const fotos = [];           // Fotos alineadas 1:1 con «piezas»
   let hasSelection = false;
   let hasError = false;
 
-  inputs.forEach(input => {
+  document.querySelectorAll('.devolucion-qty-input').forEach(input => {
     const movId = parseInt(input.getAttribute('data-mov-id'));
     const qty = parseInt(input.value) || 0;
     const maxQty = parseInt(input.getAttribute('max'));
+    if (qty <= 0) return;
 
-    if (qty > 0) {
-      hasSelection = true;
-      if (qty > maxQty) {
-        toast('La cantidad a devolver excede el límite disponible.', false);
-        hasError = true;
-        return;
-      }
-      items.push({ movimiento_id: movId, qty_a_devolver: qty });
+    hasSelection = true;
+    if (qty > maxQty) {
+      toast('La cantidad a devolver excede el límite disponible.', false);
+      hasError = true;
+      return;
     }
+    items.push({ movimiento_id: movId, qty_a_devolver: qty });
+
+    const ctx = _dpContexto(input);
+    if (!ctx) return;
+    const nombre = input.closest('tr').querySelector('td').textContent.trim().split('\n')[0].trim();
+    const suma = _dpSumaSlots(ctx.slots);
+    if (suma !== qty) {
+      toast(`Las piezas de "${nombre}" suman ${suma} unidades, pero devuelves ${qty}.`, false);
+      hasError = true;
+    }
+    ctx.slots.forEach(s => {
+      const diseno = s.querySelector('.dp-slot-diseno').value.trim();
+      const sq = parseInt(s.querySelector('.dp-slot-qty').value) || 0;
+      const foto = s.querySelector('.dp-slot-foto').files[0];
+      if (!diseno) { toast(`Describe el diseño de cada pieza de "${nombre}".`, false); hasError = true; }
+      if (!foto) { toast(`Sube la foto del diseño de cada pieza de "${nombre}".`, false); hasError = true; }
+      else if (!sq || sq < 1) { toast(`Cada diseño de "${nombre}" debe tener al menos 1 unidad.`, false); hasError = true; }
+      piezas.push({ movimiento_id: movId, qty: sq || 1, diseno });
+      fotos.push(foto);
+    });
   });
 
   if (hasError) return;
@@ -2317,10 +2459,18 @@ window.confirmarDevolucionParcial = async function() {
     return;
   }
 
-  showConfirm('¿Proceder con la devolución parcial? El inventario de los artículos indicados será restaurado.', async () => {
+  showConfirm('¿Proceder con la devolución parcial? El inventario será restaurado y las piezas quedarán registradas en Devoluciones con su diseño y foto.', async () => {
     try {
-      await req('POST', '/ventas/devolver', { folio: activeDevolucionFolio, items });
-      toast('✅ Devolución parcial procesada e inventario restaurado', true);
+      const resp = await req('POST', '/ventas/devolver', { folio: activeDevolucionFolio, items, piezas });
+      const creadas = resp.devoluciones || [];
+      let fallos = 0;
+      for (let i = 0; i < creadas.length; i++) {
+        if (!fotos[i]) continue;
+        try { await devSubirFotoPieza(creadas[i].id, fotos[i]); }
+        catch (e) { fallos++; }
+      }
+      if (fallos) toast(`⚠️ Devolución procesada, pero ${fallos} foto(s) no se pudieron subir. Súbelas desde la página Devoluciones.`, false);
+      else toast('✅ Devolución parcial procesada e inventario restaurado', true);
       cerrarModalDevolucion();
       await loadProductos();
       await loadVentasAgrupadas();

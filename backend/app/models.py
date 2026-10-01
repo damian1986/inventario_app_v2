@@ -160,6 +160,33 @@ class AuditLog(Base):
     fecha       = Column(DateTime(timezone=True), server_default=func.now())
 
 
+# ── PLAYERAS DEVUELTAS ───────────────────────────────────────────────
+
+class Devolucion(Base):
+    """Pieza devuelta por un cliente, lista para re-venderse.
+
+    Cada fila es un lote de piezas idénticas (mismo producto/color/talla/diseño).
+    La foto del diseño es obligatoria al registrar (se guarda en uploads/devoluciones/).
+    """
+    __tablename__ = "devoluciones"
+    id = Column(Integer, primary_key=True, index=True)
+    producto_id = Column(Integer, ForeignKey("productos.id", ondelete="SET NULL"), nullable=True, index=True)
+    producto_nombre = Column(String(200), default="")
+    color = Column(String(100), default="")
+    talla = Column(String(50), default="")
+    variante = Column(String(200), default="")
+    diseno = Column(String(300), default="")
+    imagen = Column(String(300), default="")       # nombre de archivo en uploads/devoluciones/
+    qty = Column(Integer, default=1)
+    precio = Column(Numeric(12, 2), default=0)     # precio de venta al público
+    folio_origen = Column(String(50), default="")  # folio de venta de origen (si aplica)
+    motivo = Column(String(100), default="")
+    notas = Column(Text, default="")
+    estado = Column(String(20), default="disponible", index=True)  # disponible | vendida | descartada
+    fecha_ingreso = Column(DateTime(timezone=True), server_default=func.now())
+    fecha_salida = Column(DateTime(timezone=True), nullable=True)
+
+
 # ── CONTABILIDAD E INSUMOS ───────────────────────────────────────────
 
 class CatalogoInsumo(Base):

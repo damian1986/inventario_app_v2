@@ -345,9 +345,82 @@ class DevolucionParcialItem(BaseModel):
     qty_a_devolver: int
 
 
+class DevolucionPiezaIn(BaseModel):
+    """Pieza devuelta que además se registra con diseño/foto para re-venderse."""
+    movimiento_id: int
+    qty: int = 1
+    diseno: str
+    notas: Optional[str] = ""
+
+
 class DevolucionParcialRequest(BaseModel):
     folio: str
     items: List[DevolucionParcialItem]
+    piezas: List[DevolucionPiezaIn] = []
+
+
+# ── DEVOLUCIONES (PLAYERAS DEVUELTAS) ────────────────────────────────
+
+class DevolucionUpdateIn(BaseModel):
+    diseno: Optional[str] = None
+    motivo: Optional[str] = None
+    notas: Optional[str] = None
+    precio: Optional[float] = None
+    qty: Optional[int] = None
+
+
+class DevolucionVenderIn(BaseModel):
+    canal: Optional[str] = "Devolución"
+    notas: Optional[str] = ""
+
+
+class DevolucionDescartarIn(BaseModel):
+    motivo: Optional[str] = ""
+
+
+class DevolucionOut(BaseModel):
+    id: int
+    producto_id: Optional[int] = None
+    producto_nombre: str = ""
+    color: str = ""
+    talla: str = ""
+    variante: str = ""
+    diseno: str = ""
+    imagen: str = ""
+    qty: int = 1
+    precio: float = 0
+    folio_origen: str = ""
+    motivo: str = ""
+    notas: str = ""
+    estado: str = "disponible"
+    fecha_ingreso: datetime
+    fecha_salida: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DevolucionResumenItem(BaseModel):
+    producto_id: int
+    disponibles: int
+
+
+class DevolucionResumenOut(BaseModel):
+    items: List[DevolucionResumenItem]
+    total: int
+
+
+class DevolucionParcialResultOut(BaseModel):
+    status: str
+    mensaje: str
+    devoluciones: List[DevolucionOut] = []
+
+
+class DevolucionVenderOut(BaseModel):
+    status: str
+    mensaje: str
+    folio: str
+    devolucion: DevolucionOut
 
 
 # ── ALERTAS INTELIGENTES ─────────────────────────────────────────────
